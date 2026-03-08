@@ -65,3 +65,4 @@ build/
 .coverage
 htmlcov/
 /results/
+AGENTS.md
