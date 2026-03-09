@@ -335,7 +335,9 @@ def load_transcript(run_dir: Path) -> List[Dict[str, Any]]:
             line = line.strip()
             if line:
                 records.append(json.loads(line))
-    return records
+    # Realtime pipelines can flush turns out of order; judge logic should always
+    # see turns in numeric order rather than raw write order.
+    return sorted(records, key=lambda record: record["turn"])
 
 
 def load_runtime_metadata(run_dir: Path) -> Dict[str, Any]:
@@ -365,10 +367,13 @@ def build_judge_system_prompt(cross_turn_realignment: bool) -> str:
 
 def build_judge_user_prompt(
     formatted_turns: str,
-    turn_count: int,
+    turn_numbers: List[int],
     cross_turn_realignment: bool,
 ) -> str:
     """Build the mode-specific user prompt."""
+    turn_count = len(turn_numbers)
+    turn_list_str = ", ".join(str(turn_num) for turn_num in turn_numbers)
+
     if cross_turn_realignment:
         instructions = f"""Please perform your two-phase evaluation:
 1. First, analyze each turn against its golden expectation
@@ -376,7 +381,10 @@ def build_judge_user_prompt(
 3. Apply realignment adjustments to avoid double-penalizing
 4. Output the final JSON with judgments for ALL {turn_count} turns
 
-CRITICAL: Your final_judgments array MUST contain exactly {turn_count} entries (turns 0-{turn_count - 1}).
+CRITICAL: Your final_judgments array MUST contain exactly {turn_count} entries, one for each of these exact turn IDs:
+[{turn_list_str}]
+
+Do NOT renumber turns. Use the actual turn IDs shown above, even if they are non-contiguous or do not start at 0.
 
 Remember:
 - If a function is called early (before expected turn), subsequent turns should not be penalized for the "missing" call
@@ -394,7 +402,10 @@ Remember:
 3. Keep the penalty absorption rule within the current turn only
 4. Output the final JSON with judgments for ALL {turn_count} turns
 
-CRITICAL: Your final_judgments array MUST contain exactly {turn_count} entries (turns 0-{turn_count - 1}).
+CRITICAL: Your final_judgments array MUST contain exactly {turn_count} entries, one for each of these exact turn IDs:
+[{turn_list_str}]
+
+Do NOT renumber turns. Use the actual turn IDs shown above, even if they are non-contiguous or do not start at 0.
 
 Remember:
 - This is a rehydrated run. Each turn stands on its own, so do NOT mark tool_use_correct=TRUE because the expected call happened in another turn
@@ -645,7 +656,11 @@ async def judge_with_claude(
         get_relevant_dimensions_fn, kb_text=kb_text,
     )
 
-    prompt = build_judge_user_prompt(formatted_turns, len(records), cross_turn_realignment)
+    prompt = build_judge_user_prompt(
+        formatted_turns,
+        [record["turn"] for record in records],
+        cross_turn_realignment,
+    )
     system_prompt = build_judge_system_prompt(cross_turn_realignment)
     judge_version = JUDGE_VERSION if cross_turn_realignment else REHYDRATED_JUDGE_VERSION
 

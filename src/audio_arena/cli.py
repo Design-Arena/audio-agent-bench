@@ -596,6 +596,18 @@ def judge(
     if turn_indices_set is not None:
         records = [r for r in records if r["turn"] in turn_indices_set]
 
+    transcript_turns = {record["turn"] for record in records}
+    if turn_indices_set is not None:
+        target_turns = set(turn_indices_set)
+    else:
+        target_turns = set(range(len(expected_turns)))
+    missing_transcript_turns = sorted(target_turns - transcript_turns)
+    if missing_transcript_turns:
+        click.echo(
+            "Warning: transcript is missing turns that will not be judged: "
+            f"{missing_transcript_turns}"
+        )
+
     if judge_backend == "openai":
         from audio_arena.judging.openai_judge import judge_with_openai, OPENAI_JUDGE_MODEL
 

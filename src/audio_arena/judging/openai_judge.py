@@ -114,7 +114,11 @@ async def judge_with_openai(
         get_relevant_dimensions_fn, kb_text=kb_text,
     )
 
-    prompt = build_judge_user_prompt(formatted_turns, len(records), cross_turn_realignment)
+    prompt = build_judge_user_prompt(
+        formatted_turns,
+        [record["turn"] for record in records],
+        cross_turn_realignment,
+    )
     system_prompt = build_judge_system_prompt(cross_turn_realignment)
 
     client = AsyncOpenAI()
