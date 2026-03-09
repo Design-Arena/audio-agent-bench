@@ -122,7 +122,7 @@ class TurnGate(FrameProcessor):
         self,
         on_turn_ready: Callable[[str], Any],
         audio_drain_delay: float = 0.5,
-        no_response_timeout: float = 15.0,
+        no_response_timeout: float = 30.0,
         on_greeting_done: Optional[Callable[[], None]] = None,
         **kwargs,
     ):

@@ -311,10 +311,10 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
                 return
             await self._send_response_create_with_optional_input(
                 include_rehydration_input=True,
-                include_rehydration_prefix=False,
-                # The committed user audio is already in the conversation.
-                # Replaying it here can make the model answer the same turn twice.
-                include_current_audio_item=False,
+                # Re-send the full hydrated turn context so tool continuation does
+                # not depend on the session retaining prior synthetic history.
+                include_rehydration_prefix=True,
+                include_current_audio_item=True,
             )
         finally:
             self._manual_tool_continuation_retry_task = None
@@ -493,10 +493,11 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
                 self._manual_tool_continuation_retry_count = 1
                 await self._send_response_create_with_optional_input(
                     include_rehydration_input=True,
-                    include_rehydration_prefix=False,
-                    # Continue from the tool result only; do not replay the
-                    # just-committed user audio item during the same turn.
-                    include_current_audio_item=False,
+                    # Re-send the full hydrated turn context so continuation is
+                    # deterministic even if prior synthetic history is not
+                    # treated as durable conversation state.
+                    include_rehydration_prefix=True,
+                    include_current_audio_item=True,
                 )
             else:
                 await self.send_client_event(rt_events.ResponseCreateEvent())

@@ -93,7 +93,7 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
         self.assertIn("\"event_id\": \"EVT-3001\"", messages[0]["content"])
         self.assertIn("Assistant: Your event is booked.", messages[0]["content"])
 
-    def test_manual_tool_continuation_input_does_not_replay_current_audio_item(self):
+    def test_manual_tool_continuation_input_replays_full_hydrated_context(self):
         service = OpenAIRealtimeLLMServiceExplicitToolResult.__new__(
             OpenAIRealtimeLLMServiceExplicitToolResult
         )
@@ -111,14 +111,16 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
         ]
 
         response_input = service._build_manual_response_input(
-            include_rehydration_prefix=False,
-            include_current_audio_item=False,
+            include_rehydration_prefix=True,
+            include_current_audio_item=True,
         )
 
-        self.assertEqual(len(response_input), 2)
-        self.assertEqual(response_input[0]["type"], "function_call")
-        self.assertEqual(response_input[1]["type"], "function_call_output")
-        self.assertNotIn("item_reference", [item["type"] for item in response_input])
+        self.assertEqual(len(response_input), 4)
+        self.assertEqual(response_input[0]["type"], "message")
+        self.assertEqual(response_input[1]["type"], "item_reference")
+        self.assertEqual(response_input[1]["id"], "item_audio_123")
+        self.assertEqual(response_input[2]["type"], "function_call")
+        self.assertEqual(response_input[3]["type"], "function_call_output")
 
     def test_manual_rehydrate_ignores_duplicate_stop_after_first_commit(self):
         service = OpenAIRealtimeLLMServiceExplicitToolResult.__new__(
