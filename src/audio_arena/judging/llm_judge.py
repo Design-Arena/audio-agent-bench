@@ -42,8 +42,8 @@ except ImportError:
 # Configuration
 # ============================================================================
 
-JUDGE_VERSION = "claude-agent-sdk-v11-dedup-golden-ref-sanity-check"
-REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v11-rehydrated-dedup-golden-ref-sanity-check"
+JUDGE_VERSION = "claude-agent-sdk-v12-tool-results-in-prompt"
+REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v12-rehydrated-tool-results-in-prompt"
 JUDGE_MODEL = "claude-opus-4-5"
 
 # System prompt for the two-phase judge
@@ -567,6 +567,13 @@ def format_turns_for_judge(
             lines.append(f"**Actual Functions**: {calls_str}")
         else:
             lines.append("**Actual Functions**: none")
+
+        actual_results = rec.get('tool_results', [])
+        if actual_results:
+            results_str = json.dumps(actual_results)
+            lines.append(f"**Actual Function Results**: {results_str}")
+        else:
+            lines.append("**Actual Function Results**: none")
 
         lines.append("")
         lines.append("---")

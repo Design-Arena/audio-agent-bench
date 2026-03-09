@@ -23,8 +23,8 @@ from .llm_judge import (
 )
 
 
-OPENAI_JUDGE_VERSION = "openai-v3-expanded-contradiction-patterns"
-OPENAI_REHYDRATED_JUDGE_VERSION = "openai-v3-rehydrated-expanded-contradiction-patterns"
+OPENAI_JUDGE_VERSION = "openai-v4-tool-results-in-prompt"
+OPENAI_REHYDRATED_JUDGE_VERSION = "openai-v4-rehydrated-tool-results-in-prompt"
 OPENAI_JUDGE_MODEL = "gpt-5.2"
 
 
