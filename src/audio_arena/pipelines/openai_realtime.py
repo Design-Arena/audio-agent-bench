@@ -195,6 +195,7 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         self._rehydration_input_prefix = list(rehydration_input_prefix or [])
         self._awaiting_manual_audio_commit = False
         self._manual_committed_audio_item_id: Optional[str] = None
+        self._manual_turn_input_committed = False
         self._pending_manual_tool_results: list[dict[str, str]] = []
         self._awaiting_manual_tool_continuation_start = False
         self._manual_tool_continuation_retry_count = 0
@@ -311,7 +312,9 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
             await self._send_response_create_with_optional_input(
                 include_rehydration_input=True,
                 include_rehydration_prefix=False,
-                include_current_audio_item=True,
+                # The committed user audio is already in the conversation.
+                # Replaying it here can make the model answer the same turn twice.
+                include_current_audio_item=False,
             )
         finally:
             self._manual_tool_continuation_retry_task = None
@@ -339,6 +342,12 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
             logger.warning("[OpenAI Realtime] Already waiting for input_audio_buffer.committed; ignoring duplicate stop event")
             return
 
+        if self._manual_turn_input_committed:
+            logger.debug(
+                "[OpenAI Realtime] Ignoring duplicate user stop event after turn audio was already committed"
+            )
+            return
+
         if self._manual_response_in_flight:
             logger.debug("[OpenAI Realtime] Ignoring user stop event while response is still in flight")
             return
@@ -364,6 +373,7 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
 
         self._awaiting_manual_audio_commit = False
         self._manual_committed_audio_item_id = evt.item_id
+        self._manual_turn_input_committed = True
         self._clear_manual_tool_continuation_state()
         logger.info(
             f"[OpenAI Realtime] Input audio committed (item_id={evt.item_id}); sending manual response.create with rehydration input"
@@ -484,7 +494,9 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
                 await self._send_response_create_with_optional_input(
                     include_rehydration_input=True,
                     include_rehydration_prefix=False,
-                    include_current_audio_item=True,
+                    # Continue from the tool result only; do not replay the
+                    # just-committed user audio item during the same turn.
+                    include_current_audio_item=False,
                 )
             else:
                 await self.send_client_event(rt_events.ResponseCreateEvent())
