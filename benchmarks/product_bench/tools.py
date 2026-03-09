@@ -80,7 +80,7 @@ update_cart_function = FunctionSchema(
     properties={
         "cart_id": {
             "type": "string",
-            "description": "The cart ID to update.",
+            "description": "The exact cart ID returned earlier. Do not use placeholders like 'current' or 'latest'.",
         },
         "field": {
             "type": "string",

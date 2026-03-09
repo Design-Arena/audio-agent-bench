@@ -89,7 +89,7 @@ update_event_function = FunctionSchema(
     properties={
         "event_id": {
             "type": "string",
-            "description": "The event booking ID to update.",
+            "description": "The exact event booking ID returned earlier. Do not use placeholders like 'current' or 'latest'.",
         },
         "field": {
             "type": "string",

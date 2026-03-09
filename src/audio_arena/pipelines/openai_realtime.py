@@ -229,13 +229,16 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         await super()._process_completed_function_calls(send_new_results)
 
     def _build_manual_response_input(
-        self, *, include_rehydration_prefix_and_audio: bool
+        self,
+        *,
+        include_rehydration_prefix: bool,
+        include_current_audio_item: bool,
     ) -> list[dict[str, Any]]:
         response_input: list[dict[str, Any]] = []
-        if include_rehydration_prefix_and_audio:
+        if include_rehydration_prefix:
             response_input.extend(self._rehydration_input_prefix)
-            if self._manual_committed_audio_item_id:
-                response_input.append({"type": "item_reference", "id": self._manual_committed_audio_item_id})
+        if include_current_audio_item and self._manual_committed_audio_item_id:
+            response_input.append({"type": "item_reference", "id": self._manual_committed_audio_item_id})
         for item in self._pending_manual_tool_results:
             response_input.append(
                 {
@@ -260,7 +263,8 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         self,
         *,
         include_rehydration_input: bool,
-        include_rehydration_prefix_and_audio: bool = True,
+        include_rehydration_prefix: bool = True,
+        include_current_audio_item: bool = True,
     ):
         """Send response.create, optionally with explicit `response.input`."""
         if include_rehydration_input and not self._manual_rehydrate_mode_active():
@@ -274,7 +278,8 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         }
         if include_rehydration_input:
             payload["response"]["input"] = self._build_manual_response_input(
-                include_rehydration_prefix_and_audio=include_rehydration_prefix_and_audio
+                include_rehydration_prefix=include_rehydration_prefix,
+                include_current_audio_item=include_current_audio_item,
             )
             self._manual_response_in_flight = True
 
@@ -305,7 +310,8 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
                 return
             await self._send_response_create_with_optional_input(
                 include_rehydration_input=True,
-                include_rehydration_prefix_and_audio=False,
+                include_rehydration_prefix=False,
+                include_current_audio_item=True,
             )
         finally:
             self._manual_tool_continuation_retry_task = None
@@ -364,7 +370,8 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         )
         await self._send_response_create_with_optional_input(
             include_rehydration_input=True,
-            include_rehydration_prefix_and_audio=True,
+            include_rehydration_prefix=True,
+            include_current_audio_item=True,
         )
 
     async def _handle_evt_audio_delta(self, evt):
@@ -476,7 +483,8 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
                 self._manual_tool_continuation_retry_count = 1
                 await self._send_response_create_with_optional_input(
                     include_rehydration_input=True,
-                    include_rehydration_prefix_and_audio=False,
+                    include_rehydration_prefix=False,
+                    include_current_audio_item=True,
                 )
             else:
                 await self.send_client_event(rt_events.ResponseCreateEvent())
