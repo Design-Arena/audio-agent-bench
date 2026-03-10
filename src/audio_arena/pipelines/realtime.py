@@ -609,27 +609,20 @@ class RealtimePipeline(BasePipeline):
         m = self.model_name.lower()
         return "grok" in m and "realtime" in m
 
-    def _use_manual_rehydrate_response_input(self) -> bool:
-        """Use structured response.create(input=...) rehydration for OpenAI Realtime.
-
-        This requires disabling server VAD so we can manually issue response.create after
-        the input audio buffer is committed and reference the committed audio item.
-        """
+    def _uses_openai_realtime_history_seeding(self) -> bool:
+        """Seed prior turns into the OpenAI Realtime session with conversation items."""
         return bool(
             self._rehydration_turns
-            and self._disable_vad
             and self._is_openai_realtime()
             and (self.service_name or "").lower() == "openai-realtime"
         )
 
     @staticmethod
-    def _build_realtime_rehydration_input(golden_turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Build structured Realtime input items from golden turns.
-
-        The output is suitable for ``response.create.response.input`` and preserves
-        user/assistant/tool chronology for prompt-free rehydration.
-        """
-        items: list[dict[str, Any]] = []
+    def _build_openai_rehydration_history_items(
+        golden_turns: list[dict[str, Any]]
+    ) -> list[rt_events.ConversationItem]:
+        """Build conversation items for OpenAI Realtime session-history seeding."""
+        items: list[rt_events.ConversationItem] = []
 
         for turn_index, turn in enumerate(golden_turns):
             user_input = turn.get("input", "")
@@ -638,12 +631,13 @@ class RealtimePipeline(BasePipeline):
             tool_responses = turn.get("function_call_response")
 
             items.append(
-                {
-                    "type": "message",
-                    "role": "user",
-                    "status": "completed",
-                    "content": [{"type": "input_text", "text": user_input}],
-                }
+                rt_events.ConversationItem(
+                    id=f"rehydrate_t{turn_index}_user",
+                    type="message",
+                    role="user",
+                    status="completed",
+                    content=[rt_events.ItemContent(type="input_text", text=user_input)],
+                )
             )
 
             calls = required_calls if isinstance(required_calls, list) else [required_calls] if required_calls else []
@@ -656,34 +650,92 @@ class RealtimePipeline(BasePipeline):
             for call_index, call in enumerate(calls):
                 call_id = f"rehydrate_call_t{turn_index}_{call_index}"
                 items.append(
-                    {
-                        "type": "function_call",
-                        "status": "completed",
-                        "call_id": call_id,
-                        "name": call["name"],
-                        "arguments": json.dumps(call.get("args", {})),
-                    }
+                    rt_events.ConversationItem(
+                        id=f"rehydrate_t{turn_index}_call_{call_index}",
+                        type="function_call",
+                        status="completed",
+                        call_id=call_id,
+                        name=call["name"],
+                        arguments=json.dumps(call.get("args", {})),
+                    )
                 )
                 if call_index < len(responses):
                     items.append(
-                        {
-                            "type": "function_call_output",
-                            "status": "completed",
-                            "call_id": call_id,
-                            "output": json.dumps(responses[call_index]),
-                        }
+                        rt_events.ConversationItem(
+                            id=f"rehydrate_t{turn_index}_output_{call_index}",
+                            type="function_call_output",
+                            status="completed",
+                            call_id=call_id,
+                            output=json.dumps(responses[call_index]),
+                        )
                     )
 
             items.append(
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": golden_text}],
-                }
+                rt_events.ConversationItem(
+                    id=f"rehydrate_t{turn_index}_assistant",
+                    type="message",
+                    role="assistant",
+                    status="completed",
+                    content=[rt_events.ItemContent(type="output_text", text=golden_text)],
+                )
             )
 
         return items
+
+    def _seed_rehydration_history_for_reconnects(self) -> None:
+        """Mirror rehydrated golden turns into reconnect fallback history."""
+        if not self._rehydration_turns or self._conversation_history:
+            return
+
+        for turn in self._rehydration_turns:
+            entry: dict[str, Any] = {
+                "user": turn.get("input", ""),
+                "assistant": turn.get("golden_text", ""),
+            }
+            required_calls = turn.get("required_function_call")
+            if required_calls:
+                calls = required_calls if isinstance(required_calls, list) else [required_calls]
+                entry["tool_calls"] = [
+                    {"name": call["name"], "args": call.get("args", {})}
+                    for call in calls
+                ]
+            self._conversation_history.append(entry)
+
+    def _reset_openai_manual_turn_state(self) -> None:
+        """Clear per-turn manual turn-handling state before queuing audio."""
+        llm = self._get_openai_realtime_llm()
+        if not (
+            self._disable_vad
+            and self._is_openai_realtime()
+            and (self.service_name or "").lower() == "openai-realtime"
+            and llm is not None
+        ):
+            return
+        llm.reset_manual_turn_state()
+
+    async def _seed_openai_rehydration_history(self) -> None:
+        """Populate prior turns into the live OpenAI Realtime session before audio."""
+        llm = self._get_openai_realtime_llm()
+        if not (self._uses_openai_realtime_history_seeding() and llm is not None):
+            return
+        await llm.seed_rehydration_history()
+
+    def _get_openai_realtime_llm(self):
+        from audio_arena.pipelines.openai_realtime import (
+            OpenAIRealtimeLLMServiceExplicitToolResult,
+        )
+
+        if isinstance(self.llm, OpenAIRealtimeLLMServiceExplicitToolResult):
+            return self.llm
+        return None
+
+    def _get_last_tool_result(self) -> dict[str, Any]:
+        # OpenAI/xAI realtime services need a pull-based accessor because the tool
+        # handler runs on the pipeline, but the websocket protocol work happens in
+        # the service object.
+        if self._last_tool_result is None:
+            return {"status": "success"}
+        return self._last_tool_result
 
     def _get_audio_duration(self, audio_path: str) -> float:
         """Get duration of an audio file in seconds.
@@ -772,23 +824,24 @@ class RealtimePipeline(BasePipeline):
                 system_instruction=system_instruction,
                 session_properties=session_props,
             )
-            # Pass actual tool result getter so model gets real response before speaking.
             if "ExplicitToolResult" in class_name or "XAIRealtime" in class_name:
-                kwargs["get_last_tool_result"] = lambda: getattr(
-                    self, "_last_tool_result", {"status": "success"}
-                )
+                # The service sends function_call_output over the websocket after
+                # the pipeline's tool handler has already produced the payload.
+                kwargs["get_last_tool_result"] = self._get_last_tool_result
             if "ExplicitToolResult" in class_name:
                 kwargs["on_reconnecting"] = self._on_ws_reconnecting
                 kwargs["on_reconnected"] = self._on_ws_reconnected
-                if self._use_manual_rehydrate_response_input():
-                    rehydration_input_prefix = self._build_realtime_rehydration_input(
+                if self._uses_openai_realtime_history_seeding():
+                    # OpenAI Realtime can ingest prior turns directly as conversation
+                    # items, which is closer to real session state than stuffing the
+                    # same history back into the system prompt.
+                    rehydration_history_items = self._build_openai_rehydration_history_items(
                         self._rehydration_turns or []
                     )
-                    kwargs["enable_manual_rehydrate_response_input"] = True
-                    kwargs["rehydration_input_prefix"] = rehydration_input_prefix
+                    kwargs["rehydration_history_items"] = rehydration_history_items
                     logger.info(
-                        f"[Rehydration] Using structured response.create input with "
-                        f"{len(rehydration_input_prefix)} prior items"
+                        f"[Rehydration] Using conversation.item.create history seeding with "
+                        f"{len(rehydration_history_items)} prior items"
                     )
             return service_class(**kwargs)
         elif "UltravoxRealtime" in class_name:
@@ -858,19 +911,18 @@ class RealtimePipeline(BasePipeline):
         system_instruction = getattr(self.benchmark, "system_instruction", "")
         tools = getattr(self.benchmark, "tools_schema", None)
 
-        # In rehydration mode, either:
-        # - use structured response.create(input=...) rehydration (manual mode), or
-        # - fall back to system-instruction hydration (legacy path / server-VAD mode).
-        if self._rehydration_turns and not self._use_manual_rehydrate_response_input():
+        # In rehydration mode, OpenAI Realtime seeds prior turns directly into the
+        # session. Other providers fall back to system-instruction hydration.
+        if self._rehydration_turns and not self._uses_openai_realtime_history_seeding():
             _, instruction_suffix = self.build_rehydration_history(self._rehydration_turns)
             system_instruction = system_instruction + instruction_suffix
             logger.info(
                 f"[Rehydration] Enriched system instruction with {len(self._rehydration_turns)} "
                 f"golden turns ({len(system_instruction)} chars total)"
             )
-        elif self._use_manual_rehydrate_response_input():
+        elif self._uses_openai_realtime_history_seeding():
             logger.info(
-                f"[Rehydration] Using response.create(input=...) hydration; "
+                f"[Rehydration] Using conversation.item.create session-history seeding; "
                 f"system instruction remains base prompt ({len(system_instruction)} chars)"
             )
 
@@ -1339,66 +1391,31 @@ class RealtimePipeline(BasePipeline):
             await self._initialize_recording_and_start_audio()
 
     async def _queue_first_turn(self) -> None:
-        """Queue context frame for Gemini Live (if needed).
-
-        Recording initialization and first audio queuing now happens in
-        _initialize_recording_and_start_audio(), which is called by the
-        on_pipeline_started event handler. This ensures we wait for the
-        LLM service (e.g., OpenAI WebSocket) to be fully connected before
-        starting audio, eliminating the ~650ms buffering delay.
-        """
-        # For Gemini Live, push context frame to initialize the LLM with system
-        # instruction and tools. This triggers ONE reconnect at startup.
-        # For OpenAI Realtime and Ultravox Realtime, DO NOT send a context frame -
-        # they get their config via session_properties/params at construction time.
+        """Queue the startup context frame for Gemini Live."""
         if self._is_gemini_live():
             await self.task.queue_frames([LLMContextFrame(self.context)])
 
-        # Recording initialization and audio queuing is now triggered by
-        # on_pipeline_started event handler (see _build_task)
-
     async def _initialize_recording_and_start_audio(self) -> None:
-        """Initialize recording baselines and queue first turn audio.
-
-        Called by on_pipeline_started event handler AFTER StartFrame has
-        reached the end of the pipeline. This ensures the LLM service
-        (e.g., OpenAI WebSocket) is fully connected before we start
-        sending audio, eliminating buffering delays.
-        """
-        # Initialize recording baselines on all components AT THE SAME TIME
-        # This ensures perfect wall-clock alignment between:
-        # 1. NullAudioOutputTransport (silence insertion for user + bot)
-        # 2. PacedInputTransport (user audio frame timing)
-        # 3. AudioBufferProcessor (recording)
-        #
-        # CRITICAL: We're called AFTER pipeline is ready (StartFrame reached end)
-        # so frames will flow immediately without buffering.
-
-        # Step 1: Set NullAudioOutputTransport's recording baseline
+        """Initialize recording baselines and queue the first turn."""
         if self.output_transport is not None:
             self.output_transport.reset_recording_baseline(
                 recording_sample_rate=self.audio_buffer._init_sample_rate
             )
-            # Enable tagging for the initial greeting audio.
-            # Normally tags are triggered by VADUserStoppedSpeakingFrame, but the
-            # greeting happens before any user speech, so we enable it explicitly.
             self.output_transport.enable_greeting_tag()
             logger.info("[AudioRecording] NullAudioOutputTransport recording baseline set")
 
-        # Step 2: Set PacedInputTransport's recording baseline (must use same T=0)
-        # This unblocks the feeder thread to start sending frames IMMEDIATELY
         if self.paced_input is not None:
             self.paced_input.set_recording_baseline()
             logger.info("[AudioRecording] PacedInputTransport recording baseline set")
 
-        # Step 3: Start audio recording on the AudioBufferProcessor
         logger.info("[AudioRecording] Starting audio recording")
         await self.audio_buffer.start_recording()
 
-        # Set recording start time on the LLM logger for relative timestamp logging
-        # Use NullAudioOutputTransport's recording start time as the source of truth
         if hasattr(self, 'llm_logger') and self.llm_logger is not None and self.output_transport is not None:
             self.llm_logger.set_recording_start_time(self.output_transport._recording_start_time)
+
+        self._seed_rehydration_history_for_reconnects()
+        await self._seed_openai_rehydration_history()
 
         # In rehydration mode, skip greeting entirely — no user message was sent
         # (see _setup_context) and no inference was triggered.  The model will
@@ -1418,8 +1435,8 @@ class RealtimePipeline(BasePipeline):
                 logger.info(
                     f"[Pipeline] Rehydration mode — skipping greeting, proceeding to audio "
                     + (
-                        f"({len(self._rehydration_turns)} golden turns via response.create input)"
-                        if self._use_manual_rehydrate_response_input()
+                        f"({len(self._rehydration_turns)} golden turns via conversation.item.create)"
+                        if self._uses_openai_realtime_history_seeding()
                         else f"({len(self._rehydration_turns)} golden turns in system prompt)"
                     )
                 )
@@ -1468,6 +1485,7 @@ class RealtimePipeline(BasePipeline):
 
         if audio_path:
             try:
+                self._reset_openai_manual_turn_state()
                 # Track when this audio will finish playing
                 audio_duration = self._get_audio_duration(audio_path)
                 self._current_audio_end_time = time.monotonic() + audio_duration
@@ -1521,6 +1539,7 @@ class RealtimePipeline(BasePipeline):
 
         if audio_path:
             try:
+                self._reset_openai_manual_turn_state()
                 # Track when this audio will finish playing
                 audio_duration = self._get_audio_duration(audio_path)
                 self._current_audio_end_time = time.monotonic() + audio_duration

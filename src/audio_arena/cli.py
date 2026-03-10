@@ -186,12 +186,13 @@ def get_disable_vad_status_messages(
     if rehydrate:
         return [
             "[disable-vad] Active: server-side VAD disabled for OpenAI Realtime.",
-            "[disable-vad] Active: using manual response.create(input=...) rehydration flow.",
+            "[disable-vad] Active: using manual input_audio_buffer.commit/response.create turn handling.",
+            "[disable-vad] Rehydration still seeds prior turns with conversation.item.create.",
         ]
 
     return [
         "[disable-vad] Active: server-side VAD disabled for OpenAI Realtime.",
-        "[disable-vad] Note: manual response.create(input=...) hydration only applies with --rehydrate.",
+        "[disable-vad] Note: prior-turn rehydration is separate and does not use response.create input.",
     ]
 
 
@@ -267,7 +268,7 @@ def cli():
 @click.option(
     "--disable-vad",
     is_flag=True,
-    help="Disable server-side VAD for compatible realtime models (manual response.create flow).",
+    help="Disable server-side VAD for compatible realtime models (manual input_audio_buffer.commit/response.create flow).",
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def run(

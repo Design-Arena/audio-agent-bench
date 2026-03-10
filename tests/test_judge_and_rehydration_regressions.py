@@ -6,6 +6,7 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 
 from audio_arena.judging.llm_judge import format_turns_for_judge
 from audio_arena.pipelines.openai_realtime import OpenAIRealtimeLLMServiceExplicitToolResult
+from audio_arena.pipelines.realtime import RealtimePipeline
 from audio_arena.pipelines.text import TextPipeline
 
 
@@ -93,40 +94,39 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
         self.assertIn("\"event_id\": \"EVT-3001\"", messages[0]["content"])
         self.assertIn("Assistant: Your event is booked.", messages[0]["content"])
 
-    def test_manual_tool_continuation_input_replays_full_hydrated_context(self):
+    def test_openai_rehydration_history_uses_conversation_items_with_assistant_output_text(self):
+        items = RealtimePipeline._build_openai_rehydration_history_items(
+            [
+                {
+                    "input": "book the event",
+                    "golden_text": "Your event is booked.",
+                    "required_function_call": {
+                        "name": "book_event",
+                        "args": {"name": "Priya Mehta"},
+                    },
+                    "function_call_response": {
+                        "status": "success",
+                        "event_id": "EVT-3001",
+                    },
+                }
+            ]
+        )
+
+        self.assertEqual(len(items), 4)
+        self.assertEqual(items[0].type, "message")
+        self.assertEqual(items[0].role, "user")
+        self.assertEqual(items[0].content[0].type, "input_text")
+        self.assertEqual(items[1].type, "function_call")
+        self.assertEqual(items[2].type, "function_call_output")
+        self.assertEqual(items[3].type, "message")
+        self.assertEqual(items[3].role, "assistant")
+        self.assertEqual(items[3].content[0].type, "output_text")
+        self.assertEqual(items[3].content[0].text, "Your event is booked.")
+
+    def test_manual_turn_handling_ignores_duplicate_stop_after_first_commit(self):
         service = OpenAIRealtimeLLMServiceExplicitToolResult.__new__(
             OpenAIRealtimeLLMServiceExplicitToolResult
         )
-        service._rehydration_input_prefix = [
-            {"type": "message", "role": "user", "status": "completed", "content": []}
-        ]
-        service._manual_committed_audio_item_id = "item_audio_123"
-        service._pending_manual_tool_results = [
-            {
-                "call_id": "call_123",
-                "name": "send_email",
-                "arguments": "{\"to\":\"alex@example.com\"}",
-                "output": "{\"status\":\"success\"}",
-            }
-        ]
-
-        response_input = service._build_manual_response_input(
-            include_rehydration_prefix=True,
-            include_current_audio_item=True,
-        )
-
-        self.assertEqual(len(response_input), 4)
-        self.assertEqual(response_input[0]["type"], "message")
-        self.assertEqual(response_input[1]["type"], "item_reference")
-        self.assertEqual(response_input[1]["id"], "item_audio_123")
-        self.assertEqual(response_input[2]["type"], "function_call")
-        self.assertEqual(response_input[3]["type"], "function_call_output")
-
-    def test_manual_rehydrate_ignores_duplicate_stop_after_first_commit(self):
-        service = OpenAIRealtimeLLMServiceExplicitToolResult.__new__(
-            OpenAIRealtimeLLMServiceExplicitToolResult
-        )
-        service._enable_manual_rehydrate_response_input = True
         service._session_properties = SimpleNamespace(
             audio=SimpleNamespace(
                 input=SimpleNamespace(turn_detection=False)
