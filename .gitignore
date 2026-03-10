@@ -14,6 +14,10 @@ src/audio_arena/supabase/
 
 # Benchmark audio files (downloaded from HF on first run)
 benchmarks/*/audio/
+benchmarks/*/real_audio/
+
+# Raw audio recordings (pre-processed originals)
+new_audio/
 
 # HF dataset staging folders
 benchmarks/*/hf_dataset/

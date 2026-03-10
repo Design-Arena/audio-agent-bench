@@ -191,11 +191,57 @@ Or download manually with the HF CLI:
 huggingface-cli download arcada-labs/conversation-bench --local-dir benchmarks/conversation_bench --include "audio/*.wav"
 ```
 
+### Real Audio (Human-Recorded)
+
+Benchmarks support real (human-recorded) audio alongside the default TTS-generated audio. Each speaker's recordings live in a subdirectory under `real_audio/`:
+
+```
+benchmarks/appointment_bench/real_audio/
+├── person1/
+│   ├── turn_000.wav
+│   ├── turn_001.wav
+│   └── ...
+└── person2/
+    └── ...
+```
+
+Real audio is hosted on the same HF dataset repos and downloaded automatically when needed.
+
+```bash
+# Run with a specific speaker's real audio
+uv run audio-arena run appointment_bench --model gpt-realtime --real-audio person1
+
+# Run all available speakers sequentially
+uv run audio-arena run appointment_bench --model gpt-realtime --real-audio all
+
+# List available speakers for a benchmark
+uv run audio-arena list-speakers appointment_bench
+```
+
+To pre-download real audio manually:
+
+```bash
+huggingface-cli download arcada-labs/appointment-bench --local-dir benchmarks/appointment_bench --include "real_audio/**/*.wav"
+```
+
+To upload real audio recordings to HF:
+
+```bash
+# Upload a specific speaker's recordings
+uv run python scripts/publish_to_hf.py appointment_bench --repo arcada-labs/appointment-bench --real-audio-only --speaker person1
+
+# Upload all speakers
+uv run python scripts/publish_to_hf.py appointment_bench --repo arcada-labs/appointment-bench --real-audio-only
+```
+
 ### Listing Options
 
 ```bash
 # List available benchmarks
 uv run audio-arena list-benchmarks
+
+# List available speakers for a benchmark
+uv run audio-arena list-speakers appointment_bench
 
 # List available pipelines
 uv run audio-arena list-pipelines
@@ -236,7 +282,8 @@ Benchmarks are located in `benchmarks/`. Each benchmark is a self-contained Pyth
 - `tools.py` - Tool/function schema definitions
 - `system.py` - System prompt with knowledge base
 - `data/knowledge_base.txt` - Knowledge base content
-- `audio/` - Downloaded automatically from Hugging Face on first run
+- `audio/` - TTS audio, downloaded automatically from Hugging Face on first run
+- `real_audio/` - Human-recorded audio per speaker, downloaded from HF when `--real-audio` is used
 
 ### Available Benchmarks
 
@@ -293,7 +340,8 @@ audio-arena/
 │       ├── config.py              # HF repo: arcada-labs/conversation-bench
 │       ├── turns.py, tools.py, system.py
 │       ├── data/knowledge_base.txt
-│       └── audio/                 # Downloaded from HF (gitignored)
+│       ├── audio/                 # TTS audio, downloaded from HF (gitignored)
+│       └── real_audio/            # Human-recorded audio, downloaded from HF (gitignored)
 │
 ├── scripts/
 │   └── analyze_turn_metrics.py    # Per-turn timing analysis
