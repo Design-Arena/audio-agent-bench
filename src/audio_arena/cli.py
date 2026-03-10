@@ -269,6 +269,12 @@ def cli():
     is_flag=True,
     help="Disable server-side VAD for compatible realtime models (manual response.create flow).",
 )
+@click.option(
+    "--real-audio",
+    "real_audio_speaker",
+    default=None,
+    help='Use real (human-recorded) audio. Pass a speaker name (e.g., "person1") or "all" to run every speaker.',
+)
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
 def run(
     benchmark_name: str,
@@ -279,6 +285,7 @@ def run(
     rehydrate: bool,
     parallel: int,
     disable_vad: bool,
+    real_audio_speaker: Optional[str],
     verbose: bool,
 ):
     """Run a benchmark against an LLM.
@@ -288,11 +295,20 @@ def run(
 
     Examples:
         uv run audio-arena run conversation_bench --model gpt-realtime
+        uv run audio-arena run conversation_bench --model gpt-realtime --real-audio person1
+        uv run audio-arena run conversation_bench --model gpt-realtime --real-audio all
         uv run audio-arena run conversation_bench --model nova-sonic
         uv run audio-arena run conversation_bench --model gemini-native-audio --rehydrate
         uv run audio-arena run conversation_bench --model claude-sonnet-4-5 --service anthropic
     """
     model, service, pipeline = resolve_model_alias(model, service, pipeline)
+
+    if real_audio_speaker and real_audio_speaker.lower() == "all":
+        _run_all_speakers(
+            benchmark_name, model, service, pipeline, only_turns,
+            rehydrate, parallel, disable_vad, verbose,
+        )
+        return
 
     if rehydrate:
         asyncio.run(
@@ -305,6 +321,7 @@ def run(
                 verbose,
                 parallel,
                 disable_vad=disable_vad,
+                real_audio_speaker=real_audio_speaker,
             )
         )
     else:
@@ -317,8 +334,120 @@ def run(
                 only_turns,
                 verbose,
                 disable_vad=disable_vad,
+                real_audio_speaker=real_audio_speaker,
             )
         )
+
+
+def _run_all_speakers(
+    benchmark_name: str,
+    model: str,
+    service: Optional[str],
+    pipeline: Optional[str],
+    only_turns: Optional[str],
+    rehydrate: bool,
+    parallel: int,
+    disable_vad: bool,
+    verbose: bool,
+):
+    """Run the benchmark once per available real-audio speaker."""
+    BenchmarkConfig = load_benchmark(benchmark_name)
+    benchmark = BenchmarkConfig()
+    speakers = benchmark.list_speakers()
+    if not speakers:
+        # Try downloading the full real_audio/ tree from HF
+        _download_real_audio(benchmark, speaker=None)
+        speakers = benchmark.list_speakers()
+    if not speakers:
+        raise click.UsageError(
+            f"No real audio speakers found for {benchmark_name}. "
+            f"Add recordings to benchmarks/{benchmark_name}/real_audio/<speaker>/ "
+            f"or upload them to HF first."
+        )
+    click.echo(f"Running all speakers: {speakers}")
+    for speaker in speakers:
+        click.echo(f"\n{'='*60}")
+        click.echo(f"Speaker: {speaker}")
+        click.echo(f"{'='*60}")
+        if rehydrate:
+            asyncio.run(
+                _run_rehydrated(
+                    benchmark_name, model, service, pipeline, only_turns,
+                    verbose, parallel, disable_vad=disable_vad,
+                    real_audio_speaker=speaker,
+                )
+            )
+        else:
+            asyncio.run(
+                _run(
+                    benchmark_name, model, service, pipeline, only_turns,
+                    verbose, disable_vad=disable_vad,
+                    real_audio_speaker=speaker,
+                )
+            )
+
+
+def _download_real_audio(benchmark, speaker: Optional[str] = None):
+    """Download real audio from HF if not present locally."""
+    hf_repo = getattr(benchmark, "hf_repo", None)
+    if not hf_repo:
+        return
+
+    try:
+        from huggingface_hub import hf_hub_download, list_repo_tree
+    except ImportError:
+        click.echo("huggingface_hub not installed — cannot auto-download real audio.")
+        return
+
+    if speaker:
+        include = f"real_audio/{speaker}/*.wav"
+    else:
+        include = "real_audio/**/*.wav"
+
+    target_dir = benchmark._benchmark_dir
+    click.echo(f"Downloading real audio from HF ({hf_repo}) ...")
+
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id=hf_repo,
+            repo_type="dataset",
+            allow_patterns=[include],
+            local_dir=str(target_dir),
+        )
+        click.echo("Download complete.")
+    except Exception as e:
+        click.echo(f"Could not download real audio from HF: {e}")
+
+
+def _setup_real_audio(benchmark, speaker: str):
+    """Configure benchmark for real audio: download if needed, validate coverage."""
+    speaker_dir = benchmark.real_audio_dir / speaker
+    if not speaker_dir.exists() or not any(speaker_dir.glob("*.wav")):
+        _download_real_audio(benchmark, speaker=speaker)
+
+    if not speaker_dir.exists() or not any(speaker_dir.glob("*.wav")):
+        raise click.UsageError(
+            f"No real audio files found for speaker '{speaker}' at {speaker_dir}. "
+            f"Record audio files as {speaker_dir}/turn_000.wav, turn_001.wav, ... "
+            f"or upload to HF and re-run."
+        )
+
+    total_turns = len(benchmark.turns)
+    missing = []
+    for i in range(total_turns):
+        if not (speaker_dir / f"turn_{i:03d}.wav").exists():
+            missing.append(f"turn_{i:03d}.wav")
+    if missing:
+        raise click.UsageError(
+            f"Speaker '{speaker}' is missing {len(missing)}/{total_turns} turn files "
+            f"in {speaker_dir}: {', '.join(missing[:5])}"
+            + (f" ... and {len(missing)-5} more" if len(missing) > 5 else "")
+        )
+
+    benchmark.use_real_audio = True
+    benchmark.real_audio_speaker = speaker
+    click.echo(f"Using real audio: speaker={speaker} ({total_turns} turns)")
 
 
 async def _run(
@@ -329,11 +458,15 @@ async def _run(
     only_turns: Optional[str],
     verbose: bool,
     disable_vad: bool = False,
+    real_audio_speaker: Optional[str] = None,
 ):
     """Async implementation of the run command."""
     # Load benchmark
     BenchmarkConfig = load_benchmark(benchmark_name)
     benchmark = BenchmarkConfig()
+
+    if real_audio_speaker:
+        _setup_real_audio(benchmark, real_audio_speaker)
 
     # Infer pipeline if not specified
     if not pipeline_type:
@@ -388,6 +521,15 @@ async def _run(
             turn_indices=turn_indices,
             disable_vad=disable_vad,
         )
+        # Save audio source metadata
+        runtime_path = run_dir / "runtime.json"
+        if runtime_path.exists():
+            runtime = json.loads(runtime_path.read_text())
+        else:
+            runtime = {}
+        runtime["audio_source"] = f"real_audio/{real_audio_speaker}" if real_audio_speaker else "tts"
+        runtime_path.write_text(json.dumps(runtime, indent=2), encoding="utf-8")
+
         click.echo(f"Completed benchmark run")
         click.echo(f"  Transcript: {run_dir / 'transcript.jsonl'}")
     except Exception as e:
@@ -406,6 +548,7 @@ async def _run_rehydrated(
     verbose: bool,
     max_parallel: int = 1,
     disable_vad: bool = False,
+    real_audio_speaker: Optional[str] = None,
 ):
     """Run benchmark in single-step rehydration mode.
 
@@ -419,6 +562,10 @@ async def _run_rehydrated(
 
     BenchmarkConfig = load_benchmark(benchmark_name)
     benchmark = BenchmarkConfig()
+
+    if real_audio_speaker:
+        _setup_real_audio(benchmark, real_audio_speaker)
+
     all_turns = benchmark.turns
 
     if not pipeline_type:
@@ -507,6 +654,7 @@ async def _run_rehydrated(
         "mode": "rehydrated",
         "parallel": max_parallel,
         "disable_vad": disable_vad,
+        "audio_source": f"real_audio/{real_audio_speaker}" if real_audio_speaker else "tts",
         "note": "Single-step rehydration: each turn evaluated independently with golden prior context",
     }
     (run_dir / "runtime.json").write_text(
@@ -585,28 +733,12 @@ def judge(
         click.echo(f"Could not load benchmark '{benchmark_name}', using shared turns module")
         from benchmarks.conversation_bench.turns import turns as expected_turns
 
-    # Load knowledge base for kb_grounding verification
-    kb_path = Path("benchmarks") / benchmark_name / "data" / "knowledge_base.txt"
-    kb_text = kb_path.read_text(encoding="utf-8") if kb_path.exists() else None
-
     # Load shared utilities
     from audio_arena.judging.llm_judge import load_transcript, write_outputs
 
     records = load_transcript(run_path)
     if turn_indices_set is not None:
         records = [r for r in records if r["turn"] in turn_indices_set]
-
-    transcript_turns = {record["turn"] for record in records}
-    if turn_indices_set is not None:
-        target_turns = set(turn_indices_set)
-    else:
-        target_turns = set(range(len(expected_turns)))
-    missing_transcript_turns = sorted(target_turns - transcript_turns)
-    if missing_transcript_turns:
-        click.echo(
-            "Warning: transcript is missing turns that will not be judged: "
-            f"{missing_transcript_turns}"
-        )
 
     if judge_backend == "openai":
         from audio_arena.judging.openai_judge import judge_with_openai, OPENAI_JUDGE_MODEL
@@ -622,7 +754,6 @@ def judge(
                     skip_turn_taking=skip_turn_taking,
                     get_relevant_dimensions_fn=get_relevant_dimensions_fn,
                     model=judge_model,
-                    kb_text=kb_text,
                 )
             )
         except Exception as e:
@@ -657,7 +788,6 @@ def judge(
                     expected_turns=expected_turns,
                     skip_turn_taking=skip_turn_taking,
                     get_relevant_dimensions_fn=get_relevant_dimensions_fn,
-                    kb_text=kb_text,
                 )
             )
         except Exception as e:
@@ -720,6 +850,26 @@ def list_benchmarks():
             click.echo(f"  {name}: {description}")
         except Exception:
             click.echo(f"  {name}")
+
+
+@cli.command("list-speakers")
+@click.argument("benchmark_name")
+def list_speakers_cmd(benchmark_name: str):
+    """List available real audio speakers for a benchmark."""
+    BenchmarkConfig = load_benchmark(benchmark_name)
+    benchmark = BenchmarkConfig()
+    speakers = benchmark.list_speakers()
+    if not speakers:
+        click.echo(f"No real audio speakers found for {benchmark_name}.")
+        click.echo(f"  Expected location: benchmarks/{benchmark_name}/real_audio/<speaker>/")
+        return
+    click.echo(f"Available speakers for {benchmark_name}:")
+    total_turns = len(benchmark.turns)
+    for name in speakers:
+        speaker_dir = benchmark.real_audio_dir / name
+        wav_count = len(list(speaker_dir.glob("*.wav")))
+        status = "complete" if wav_count >= total_turns else f"{wav_count}/{total_turns} turns"
+        click.echo(f"  {name}: {status}")
 
 
 @cli.command("list-pipelines")
