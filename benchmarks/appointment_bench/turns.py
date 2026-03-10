@@ -152,7 +152,7 @@ turns = [
 # Turn 10 — Book Daniel's cleaning (first tool-call booking)
 {'input': "Perfect. Let's book mine first — the Monday morning cleaning.",
  'golden_text': "Booked! Your cleaning with Dr. Perry is confirmed for "
-                "Monday, January 13th at 9:15 AM. Appointment ID: APT-001.",
+                "Monday, January 13th at 9:15 AM.",
  'required_function_call': {'name': 'book_appointment',
                             'args': {'patient_name': 'Daniel Nolan',
                                      'phone': '415-916-1640',
@@ -189,8 +189,7 @@ turns = [
           "with a forty-five minute consultation, right?",
  'golden_text': "Yes — 3:45 plus 45 minutes puts her at 4:30 PM, well before "
                 "5:00. Booked! Danielle's orthodontic consultation with "
-                "Dr. Barry: Monday, January 13th at 3:45 PM. "
-                "Appointment ID: APT-002.",
+                "Dr. Barry: Monday, January 13th at 3:45 PM.",
  'required_function_call': {'name': 'book_appointment',
                             'args': {'patient_name': 'Danielle Nolan',
                                      'phone': '415-960-1614',
