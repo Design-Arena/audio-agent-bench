@@ -14,6 +14,13 @@ Scoring dimensions:
   - Ambiguity: Ambiguity handling (entities, numbers, context)
 """
 
+# Grocery tool-use contract:
+# - First discovery of a new catalog item should use lookup_item, even if the
+#   model could answer from prompt memory.
+# - Once an item has been established in prior conversation or verified order
+#   state, later turns should prefer reusing that state rather than making a
+#   redundant lookup_item call.
+
 # ============================================================================
 # TURNS 0-7: ORDER SETUP + FIRST ITEMS
 # ============================================================================
@@ -47,6 +54,9 @@ turns = [
                 "Added to your order.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'flour'}},
+ 'tool_use_guidance': "First discovery of flour in this session. Require "
+                      "lookup_item even if the model can infer the answer "
+                      "from prompt context.",
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '1010',
                                          'name': 'All-Purpose Flour',
@@ -85,6 +95,9 @@ turns = [
  'golden_text': "Organic Eggs, one dozen for six forty-nine. Adding.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'organic eggs'}},
+ 'tool_use_guidance': "First discovery of organic eggs in this session. "
+                      "Require lookup_item even if the spoken answer is "
+                      "otherwise correct.",
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '2015',
                                          'name': 'Organic Eggs',
@@ -269,6 +282,9 @@ turns = [
                 "order.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'flower bouquet'}},
+ 'tool_use_guidance': "First discovery of flower bouquet in this session. "
+                      "Require lookup_item; do not treat flour/flower "
+                      "homophone recall alone as sufficient grounding.",
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '8010',
                                          'name': 'Fresh Flower Bouquet',
@@ -283,6 +299,9 @@ turns = [
                 "that's under seven dollars, so I'm adding it.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'whole milk'}},
+ 'tool_use_guidance': "Whole milk is a new catalog item here. Require "
+                      "lookup_item before deciding whether the under-$7 "
+                      "condition is satisfied.",
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '2010',
                                          'name': 'Organic Whole Milk',
@@ -298,6 +317,9 @@ turns = [
                 "for four ninety-eight. Your running subtotal is now "
                 "one hundred seventy-four thirty-three.",
  'required_function_call': None,
+ 'tool_use_guidance': "Do not require redundant lookup_item calls here. "
+                      "Maple Syrup and Italian Parsley were already "
+                      "established earlier in session state.",
  'function_call_response': None,
  'categories': ['long_range_memory', 'numerical_reasoning'],
  'audio_file': 'audio/turn_019.wav'},
@@ -310,6 +332,9 @@ turns = [
                 "subtotal is now one hundred eighty-nine eighteen.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'organic bananas'}},
+ 'tool_use_guidance': "Organic bananas are introduced for the first time on "
+                      "this turn, so require lookup_item before pricing and "
+                      "subtotal math.",
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '6015',
                                          'name': 'Organic Bananas',
@@ -471,6 +496,10 @@ turns = [
                'action': 'add',
                'item_name': 'Dijon Mustard',
                'quantity': 1}}],
+ 'tool_use_guidance': "Maple Candy and Balsamic Vinegar are already known "
+                      "order items, so no lookup is needed for their removal. "
+                      "Dijon Mustard is a new item on this turn, so require "
+                      "lookup_item before adding it.",
  'function_call_response': [
      {'status': 'success'},
      {'status': 'success'},
@@ -492,6 +521,9 @@ turns = [
                                      'action': 'change_quantity',
                                      'item_name': 'All-Purpose Flour',
                                      'quantity': 1}},
+ 'tool_use_guidance': "Do not require a redundant lookup_item call. Flour "
+                      "was established earlier and only the quantity change "
+                      "matters here.",
  'function_call_response': {'status': 'success'},
  'categories': ['tool_use', 'long_range_memory', 'numerical_reasoning'],
  'audio_file': 'audio/turn_024.wav'},
@@ -506,6 +538,9 @@ turns = [
                                      'action': 'add',
                                      'item_name': 'Balsamic Vinegar',
                                      'quantity': 1}},
+ 'tool_use_guidance': "Do not require a redundant lookup_item call. "
+                      "Balsamic Vinegar was already established in prior "
+                      "session and order state.",
  'function_call_response': {'status': 'success'},
  'categories': ['tool_use', 'long_range_memory'],
  'audio_file': 'audio/turn_025.wav'},
@@ -556,6 +591,10 @@ turns = [
                                      'action': 'change_quantity',
                                      'item_name': 'All-Purpose Flour',
                                      'quantity': 2}},
+ 'tool_use_guidance': "Do not require a redundant lookup_item call. The "
+                      "benchmark expects the model to resolve 'whatever I "
+                      "ordered first' from session state and then update the "
+                      "existing order.",
  'function_call_response': {'status': 'success'},
  'categories': ['tool_use', 'long_range_memory', 'numerical_reasoning'],
  'audio_file': 'audio/turn_027.wav'},

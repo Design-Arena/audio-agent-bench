@@ -693,12 +693,27 @@ class RealtimePipeline(BasePipeline):
                 "assistant": turn.get("golden_text", ""),
             }
             required_calls = turn.get("required_function_call")
+            tool_responses = turn.get("function_call_response")
             if required_calls:
                 calls = required_calls if isinstance(required_calls, list) else [required_calls]
                 entry["tool_calls"] = [
                     {"name": call["name"], "args": call.get("args", {})}
                     for call in calls
                 ]
+                responses = (
+                    tool_responses
+                    if isinstance(tool_responses, list)
+                    else [tool_responses] if tool_responses is not None else []
+                )
+                if responses:
+                    entry["tool_results"] = [
+                        {
+                            "name": call["name"],
+                            "response": responses[idx],
+                        }
+                        for idx, call in enumerate(calls)
+                        if idx < len(responses)
+                    ]
             self._conversation_history.append(entry)
 
     def _reset_openai_manual_turn_state(self) -> None:
@@ -1033,6 +1048,11 @@ class RealtimePipeline(BasePipeline):
             if turn.get("tool_calls"):
                 for tc in turn["tool_calls"]:
                     lines.append(f"  [Tool call: {tc['name']}({tc['args']})]")
+            if turn.get("tool_results"):
+                for tool_result in turn["tool_results"]:
+                    lines.append(
+                        f"  [Tool result: {json.dumps(tool_result.get('response', {}))}]"
+                    )
             lines.append(f"Assistant: {turn['assistant']}")
             lines.append("")
 
@@ -1109,6 +1129,10 @@ class RealtimePipeline(BasePipeline):
         if audio_path:
             logger.info(f"Re-queuing audio for turn {self.turn_idx}: {audio_path}")
             try:
+                # Manual no-VAD mode latches commit state per turn; retries must
+                # clear that state before replaying audio or the next stop event
+                # will be ignored by the OpenAI Realtime service.
+                self._reset_openai_manual_turn_state()
                 self.paced_input.enqueue_wav_file(audio_path)
                 self.needs_turn_retry = False
                 audio_duration = self._get_audio_duration(audio_path)

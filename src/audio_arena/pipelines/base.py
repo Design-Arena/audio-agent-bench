@@ -65,6 +65,8 @@ class BasePipeline(ABC):
         self._duplicate_tool_call_ids: set = set()
         # Track which response index we're on for multi-step tool chains
         self._tool_response_idx: int = 0
+        # Track which scripted multi-call responses have already been used this turn
+        self._consumed_tool_response_indices: set[int] = set()
         # Last tool result (for explicit delivery to GPT/Grok Realtime APIs; see docstring below)
         self._last_tool_result: Optional[Dict[str, Any]] = None
 
@@ -327,6 +329,7 @@ class BasePipeline(ABC):
         self._seen_tool_calls.clear()
         self._duplicate_tool_call_ids.clear()
         self._tool_response_idx = 0
+        self._consumed_tool_response_indices.clear()
 
         if self.turn_idx < len(self.effective_turns):
             # Start next turn
@@ -396,26 +399,10 @@ class BasePipeline(ABC):
         # Track this call
         self._seen_tool_calls.add(call_key)
 
-        # Check if the current turn has a custom function_call_response
-        # Supports both single responses and lists of responses for multi-step tool chains
-        result = {"status": "success"}
-        if self.turn_idx < len(self.effective_turns):
-            current_turn = self.effective_turns[self.turn_idx]
-            custom_response = current_turn.get("function_call_response")
-            if custom_response is not None:
-                if isinstance(custom_response, list):
-                    # Multi-step tool chain: use response at current index
-                    if self._tool_response_idx < len(custom_response):
-                        result = custom_response[self._tool_response_idx]
-                        self._tool_response_idx += 1
-                    else:
-                        logger.warning(
-                            f"Tool response index {self._tool_response_idx} exceeds "
-                            f"available responses ({len(custom_response)}) - using default"
-                        )
-                else:
-                    # Single response (backward compatible)
-                    result = custom_response
+        result = self._get_turn_tool_response(
+            params.function_name,
+            params.arguments or {},
+        )
         self._last_tool_result = result
         await params.result_callback(result)
 
@@ -442,6 +429,69 @@ class BasePipeline(ABC):
             self.recorder.write_summary()
             # Cancel the pipeline task to exit cleanly
             await self.task.cancel()
+
+    @staticmethod
+    def _normalize_tool_args(args: Any) -> str:
+        """Return a stable string key for tool arguments."""
+        try:
+            return json.dumps(args or {}, sort_keys=True, separators=(",", ":"))
+        except TypeError:
+            return str(args or {})
+
+    def _get_turn_tool_response(
+        self,
+        function_name: str,
+        arguments: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Resolve the scripted tool response for the current turn.
+
+        For multi-call turns, prefer matching by `(tool_name, args)` so the
+        benchmark remains correct even if the model calls required tools in a
+        different order than the turn spec lists them.
+        """
+        result: Dict[str, Any] = {"status": "success"}
+        if self.turn_idx >= len(self.effective_turns):
+            return result
+
+        current_turn = self.effective_turns[self.turn_idx]
+        custom_response = current_turn.get("function_call_response")
+        if custom_response is None:
+            return result
+        if not isinstance(custom_response, list):
+            return custom_response
+
+        required_calls = current_turn.get("required_function_call")
+        normalized_args = self._normalize_tool_args(arguments)
+
+        if isinstance(required_calls, list) and len(required_calls) == len(custom_response):
+            for idx, required_call in enumerate(required_calls):
+                if idx in self._consumed_tool_response_indices:
+                    continue
+                if required_call.get("name") != function_name:
+                    continue
+                required_args = self._normalize_tool_args(required_call.get("args", {}))
+                if required_args == normalized_args:
+                    self._consumed_tool_response_indices.add(idx)
+                    self._tool_response_idx = max(self._tool_response_idx, idx + 1)
+                    return custom_response[idx]
+
+        while self._tool_response_idx < len(custom_response):
+            idx = self._tool_response_idx
+            self._tool_response_idx += 1
+            if idx in self._consumed_tool_response_indices:
+                continue
+            self._consumed_tool_response_indices.add(idx)
+            logger.warning(
+                "Falling back to positional scripted tool response for "
+                f"{function_name} args={arguments}"
+            )
+            return custom_response[idx]
+
+        logger.warning(
+            f"Tool response index {self._tool_response_idx} exceeds "
+            f"available responses ({len(custom_response)}) - using default"
+        )
+        return result
 
     # ---- Abstract methods (pipeline-specific) ----
 

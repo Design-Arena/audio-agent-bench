@@ -122,8 +122,9 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
     2. We run the tool handler ourselves (run_function_calls)
     3. We pre-mark the call as completed to prevent base class auto-send
     4. We send conversation.item.create (function_call_output) with our result
-    5. response.done fires (response is now complete)
-    6. We send response.create to trigger the model to continue
+    5. The server acknowledges the created function_call_output item
+    6. response.done fires (response is now complete)
+    7. We send response.create to trigger the model to continue
     """
 
     def __init__(
@@ -138,12 +139,53 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         self._get_last_tool_result = get_last_tool_result
         self._init_reconnection_callbacks(on_reconnecting, on_reconnected)
         self._pending_response_create = False
+        self._waiting_for_response_done_before_response_create = False
+        self._pending_tool_output_item_ids: set[str] = set()
         self._rehydration_history_items = list(rehydration_history_items or [])
         self._rehydration_history_seeded = False
         self._awaiting_manual_audio_commit = False
         self._manual_turn_input_committed = False
         self._manual_response_in_flight = False
         self._last_manual_commit_monotonic = 0.0
+
+    async def _maybe_send_deferred_response_create(self, trigger: str) -> None:
+        if not self._pending_response_create:
+            return
+
+        if self._waiting_for_response_done_before_response_create:
+            logger.debug(
+                "[OpenAI Realtime] Deferred response.create still waiting for response.done "
+                f"(trigger={trigger})"
+            )
+            return
+
+        if self._pending_tool_output_item_ids:
+            logger.debug(
+                "[OpenAI Realtime] Deferred response.create still waiting for tool-output ack(s) "
+                f"{sorted(self._pending_tool_output_item_ids)} (trigger={trigger})"
+            )
+            return
+
+        self._pending_response_create = False
+        await self.send_client_event(rt_events.ResponseCreateEvent())
+        logger.info(
+            "[OpenAI Realtime] Sent deferred response.create after response.done and "
+            f"tool-output ack (trigger={trigger})"
+        )
+
+    async def _handle_tool_output_item_event(self, evt, phase: str) -> None:
+        item = evt.item
+        if item.type != "function_call_output" or item.id not in self._pending_tool_output_item_ids:
+            return
+
+        self._pending_tool_output_item_ids.remove(item.id)
+        logger.info(
+            "[OpenAI Realtime] Tool output item acknowledged by server "
+            f"(phase={phase}, item_id={item.id}, call_id={item.call_id})"
+        )
+        await self._maybe_send_deferred_response_create(
+            trigger=f"conversation.item.{phase}:{item.id}"
+        )
 
     def _manual_turn_handling_active(self) -> bool:
         return bool(
@@ -265,6 +307,7 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         )
         output_json = json.dumps(tool_result)
         tool_output_item_id = uuid.uuid4().hex
+        self._pending_tool_output_item_ids.add(tool_output_item_id)
         create_ev = rt_events.ConversationItemCreateEvent(
             item=rt_events.ConversationItem(
                 id=tool_output_item_id,
@@ -273,14 +316,29 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
                 output=output_json,
             )
         )
-        await self.send_client_event(create_ev)
-        logger.info(f"[OpenAI Realtime] Sent function_call_output for call_id={call_id}")
-
         # response.function_call_arguments.done arrives while the original response
-        # is still active. Sending response.create immediately can trigger
-        # conversation_already_has_active_response, so we wait for response.done.
+        # is still active. We need two separate gates before continuing:
+        # 1. response.done, otherwise response.create can hit
+        #    conversation_already_has_active_response
+        # 2. a server-side ack that the function_call_output item was committed
+        #    to conversation state
         self._pending_response_create = True
-        logger.info("[OpenAI Realtime] Deferred response.create until response.done")
+        self._waiting_for_response_done_before_response_create = True
+
+        try:
+            await self.send_client_event(create_ev)
+        except Exception:
+            self._pending_tool_output_item_ids.discard(tool_output_item_id)
+            if not self._pending_tool_output_item_ids:
+                self._pending_response_create = False
+                self._waiting_for_response_done_before_response_create = False
+            raise
+
+        logger.info(f"[OpenAI Realtime] Sent function_call_output for call_id={call_id}")
+        logger.info(
+            "[OpenAI Realtime] Deferred response.create until response.done and "
+            f"tool-output ack (item_id={tool_output_item_id})"
+        )
 
     async def _handle_evt_response_done(self, evt):
         """Handle response.done: call super, then send deferred response.create if needed.
@@ -293,9 +351,16 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         self._manual_response_in_flight = False
 
         if self._pending_response_create:
-            self._pending_response_create = False
-            await self.send_client_event(rt_events.ResponseCreateEvent())
-            logger.info("[OpenAI Realtime] Sent deferred response.create after response.done")
+            self._waiting_for_response_done_before_response_create = False
+            await self._maybe_send_deferred_response_create(trigger="response.done")
+
+    async def _handle_evt_conversation_item_added(self, evt):
+        await super()._handle_evt_conversation_item_added(evt)
+        await self._handle_tool_output_item_event(evt, phase="added")
+
+    async def _handle_evt_conversation_item_done(self, evt):
+        await super()._handle_evt_conversation_item_done(evt)
+        await self._handle_tool_output_item_event(evt, phase="done")
 
     async def _handle_evt_error(self, evt):
         error = evt.error

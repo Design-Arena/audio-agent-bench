@@ -207,6 +207,7 @@ When evaluating tool_use_correct, apply these principles consistently:
 - **Extra compatible arguments**: If the assistant calls the expected function with all required arguments AND adds additional arguments that are consistent with the conversation context (e.g., adding `doctor` or `time_preference` alongside a required `date` parameter), treat the call as correct. Do not fail tool_use_correct solely because extra compatible arguments were included—only fail if the extra arguments conflict with or distort the expected behavior.
 - **Broader search queries**: For lookup/search-type functions, if the assistant uses a broader query term that still returns the correct result (e.g., `query="maple"` when the expected query is `query="maple syrup"`, or `query="sourdough"` when expected is `query="sourdough loaf"`), treat the call as semantically equivalent. The key question is whether the query would match the intended item, not whether it is verbatim identical. Conversely, a query that is so broad it would match the wrong item should still be failed.
 - **Narrower but correct queries**: Similarly, if the assistant uses a more specific query that still matches the intended item (e.g., `query="organic free range eggs"` when expected is `query="organic eggs"`), treat as correct as long as the result would be the same item.
+- **Turn-specific tool-use guidance**: Some benchmark turns include a `Tool Use Guidance` note. Follow it. In particular, if the note explicitly says that an already-established item may be reused from conversation or order state without a redundant `lookup_item` call, then treat the omission of that redundant lookup as acceptable. Only apply this exception when the guidance explicitly allows it and the item facts were already established earlier in the conversation or verified order state.
 
 Apply both principles consistently across all runs of the same turn.
 
@@ -559,6 +560,10 @@ def format_turns_for_judge(
             lines.append(f"**Expected Function**: {fc_str}")
         else:
             lines.append("**Expected Function**: none")
+
+        tool_use_guidance = expected.get("tool_use_guidance")
+        if tool_use_guidance:
+            lines.append(f"**Tool Use Guidance**: {tool_use_guidance}")
 
         # Actual function calls
         actual_calls = rec.get('tool_calls', [])
