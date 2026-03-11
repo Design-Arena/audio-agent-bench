@@ -67,7 +67,7 @@ update_patient_info_function = FunctionSchema(
     properties={
         "appointment_id": {
             "type": "string",
-            "description": "The appointment ID to update.",
+            "description": "The exact appointment ID returned earlier. Do not use placeholders like 'current' or 'latest'.",
         },
         "field": {
             "type": "string",

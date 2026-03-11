@@ -62,11 +62,11 @@ huggingface-cli download arcada-labs/conversation-bench --local-dir benchmarks/c
 Set the API keys for the services you want to use. You only need the keys for the models you plan to test.
 
 ```bash
-# Required for judging (Claude evaluates all benchmark results)
-export ANTHROPIC_API_KEY=sk-ant-...
+# Judging keys
+export ANTHROPIC_API_KEY=sk-ant-...  # Default judge for conversation_bench
+export OPENAI_API_KEY=sk-...         # Required for OpenAI judge and OpenAI models
 
 # Model provider keys (set whichever you need)
-export OPENAI_API_KEY=sk-...          # OpenAI (text and realtime)
 export GOOGLE_API_KEY=...             # Google (Gemini text and Gemini Live)
 export ULTRAVOX_API_KEY=...           # Ultravox
 export XAI_API_KEY=...                # xAI (Grok Realtime)
@@ -107,13 +107,21 @@ uv run audio-arena run conversation_bench --model grok-realtime
 # Debug with limited turns
 uv run audio-arena run conversation_bench --model gpt-4o --service openai --only-turns 0,1,2
 
+# Rehydrated single-turn replay against prior golden context
+uv run audio-arena run event_bench --model gpt-realtime-1.5 --service openai-realtime --rehydrate
+
+# Rehydrated OpenAI Realtime with manual turn commits (VAD disabled)
+uv run audio-arena run event_bench --model gpt-realtime-1.5 --service openai-realtime --rehydrate --disable-vad
+
 # Verbose logging
 uv run audio-arena run conversation_bench --model gpt-4o --service openai --verbose
 ```
 
+`--rehydrate` runs each target turn in a fresh session with golden prior context. For OpenAI Realtime, prior turns are seeded into the live session with `conversation.item.create`; the benchmark does not use `response.create.input` to replay history. With `--disable-vad`, the target turn still uses live audio plus manual `input_audio_buffer.commit` and `response.create` events to close the user turn.
+
 ### Judging Runs
 
-After a benchmark run completes, judge the results using Claude:
+After a benchmark run completes, judge the results:
 
 ```bash
 # Judge a specific run
@@ -124,9 +132,16 @@ uv run audio-arena judge runs/conversation_bench/20251213T123456_claude-sonnet-4
 
 # Use a different judge model
 uv run audio-arena judge runs/conversation_bench/20251213T123456_claude-sonnet-4-5 --judge-model claude-sonnet-4-5
+
+# Force the OpenAI judge backend
+uv run audio-arena judge runs/event_bench/20260310T011417_gpt-realtime-1.5_52ea9df5 --judge openai
 ```
 
-The Claude judge evaluates each turn on up to 5 dimensions:
+Judge backend defaults are benchmark-dependent:
+- `conversation_bench` defaults to Claude
+- `appointment_bench`, `event_bench`, and `grocery_bench` default to OpenAI
+
+The judge evaluates each turn on up to 5 dimensions:
 
 | Dimension | Scored on | Description |
 |-----------|-----------|-------------|
@@ -153,9 +168,11 @@ uv run audio-arena judge runs/conversation_bench/20260111T123456_gpt-realtime_ab
 ```
 
 Judge outputs (saved to the run directory):
-- `claude_summary.json` — score metrics (includes `turn_taking_failures` for S2S runs)
-- `claude_analysis.md` — human-readable report with failures
-- `claude_judged.jsonl` — per-turn judgments with reasoning
+- `<judge>_summary.json` — score metrics (includes `turn_taking_failures` for S2S runs)
+- `<judge>_analysis.md` — human-readable report with failures
+- `<judge>_judged.jsonl` — per-turn judgments with reasoning
+
+For example, OpenAI judging writes `openai_summary.json`, `openai_analysis.md`, and `openai_judged.jsonl`.
 
 See the [Methodology](#methodology) section for details on two-phase evaluation, penalty absorption, and category-aware scoring.
 
@@ -309,8 +326,8 @@ audio-arena/
 │   ├── pipelines/                 # Pipeline implementations
 │   │   ├── base.py                # Abstract base pipeline
 │   │   ├── text.py                # Text pipeline
-│   │   ├── realtime.py            # Realtime pipeline (Gemini/Ultravox)
-│   │   ├── openai_realtime.py     # OpenAI Realtime pipeline
+│   │   ├── realtime.py            # Shared realtime pipeline orchestration
+│   │   ├── openai_realtime.py     # OpenAI Realtime explicit-tool-result service
 │   │   ├── grok_realtime.py       # Grok Realtime pipeline
 │   │   └── nova_sonic.py          # Nova Sonic pipeline
 │   ├── processors/                # Frame processors

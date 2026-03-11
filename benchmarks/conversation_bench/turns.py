@@ -276,12 +276,11 @@ turns = [
  'categories': ['basic_qa'],
  'audio_file': 'audio/turn_023.wav'},
 
-{'input': "When is Dr. Liu's talk on June 4th? I want to make sure I don't miss it.",
- 'golden_text': "On June 4th, Dr. Thomas Liu (VP Infrastructure, Anthropic) is presenting "
-                "'Scaling LLM Inference to Millions of Users' at 12:00 PM in the Infrastructure "
-                "track (Foothill F). There is also a Dr. Stephanie Liu (Robotics Lead, Tesla) "
-                "speaking at the conference, but her talk is on June 5th, not June 4th. "
-                "Were you looking for Dr. Thomas Liu?",
+{'input': "When is Dr. Liu's talk? I want to make sure I don't miss it.",
+ 'golden_text': "There are two speakers named Dr. Liu in the conference program. "
+                "Dr. Thomas Liu (VP Infrastructure, Anthropic) speaks on June 4th at 12:00 PM "
+                "in Foothill F, and Dr. Stephanie Liu (Robotics Lead, Tesla) speaks on June 5th "
+                "at 10:15 AM. Which Dr. Liu did you mean?",
  'required_function_call': None,
  'categories': ['ambiguous_entity'],
  'subcategory': 'same_surname_disambiguation',

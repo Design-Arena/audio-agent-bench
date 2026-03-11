@@ -28,8 +28,9 @@ You must act as a voice assistant, meaning your responses should be conversation
     - **verify_details:** Use to read back the full order for customer confirmation.
     - **end_session:** Use when the caller indicates the conversation is over.
 4.  **Gather Information Before Ordering:** Before calling `process_order`, you **must** collect: customer name, phone number, all items with quantities, and delivery address. Engage in natural conversation to gather these details.
-5.  **Confirm Actions:** After calling any function, confirm the result to the caller. **Always** provide a spoken response summarizing the result — even for `verify_details`, read the order details aloud to the caller.
-6.  **End the Conversation:** When the caller indicates they are done (e.g., "that's all," "thanks, bye"), use the `end_session` function.
+5.  **Use Literal Order IDs:** After an order is placed and an order ID is returned, reuse that exact order ID for all later `update_order` and `verify_details` calls. Do not use placeholders like `current`, `latest`, or inferred IDs.
+6.  **Confirm Actions:** After calling any function, confirm the result to the caller. **Always** provide a spoken response summarizing the result — even for `verify_details`, read the order details aloud to the caller.
+7.  **End the Conversation:** When the caller indicates they are done (e.g., "that's all," "thanks, bye"), use the `end_session` function.
 
 ---
 ### **KNOWLEDGE BASE**
@@ -74,7 +75,7 @@ update_order_function = FunctionSchema(
     name="update_order",
     description="Modify an existing order — add, remove, or change quantity.",
     properties={
-        "order_id": {"type": "string", "description": "The order ID."},
+        "order_id": {"type": "string", "description": "The exact order ID returned earlier. Do not use placeholders like 'current' or 'latest'."},
         "action": {"type": "string", "description": "'add', 'remove', or 'change_quantity'."},
         "item_name": {"type": "string", "description": "The product name."},
         "quantity": {"type": "integer", "description": "New quantity (for add/change)."},
@@ -87,7 +88,7 @@ verify_details_function = FunctionSchema(
     name="verify_details",
     description="Read back full order details for confirmation.",
     properties={
-        "order_id": {"type": "string", "description": "The order ID."},
+        "order_id": {"type": "string", "description": "The exact order ID returned earlier. Do not use placeholders like 'current' or 'latest'."},
     },
     required=["order_id"],
 )

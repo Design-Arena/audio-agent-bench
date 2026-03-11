@@ -31,8 +31,9 @@ You must act as a voice assistant, meaning your responses should be conversation
     - **get_quote:** Use to generate an itemized price quote for an event configuration.
     - **end_session:** Use when the caller indicates the conversation is over.
 6.  **Gather Information Before Booking:** Before calling `book_event`, you **must** collect: contact name, phone number, event date, venue selection, guest count, catering package, and any add-ons. Engage in natural conversation to gather these details.
-7.  **Confirm Actions:** After calling any function, confirm the result to the caller. For example, "Your event has been booked at the Garden Pavilion for March 8th with 80 guests."
-8.  **End the Conversation:** When the caller indicates they are done (e.g., "that's all," "thanks, bye"), use the `end_session` function.
+7.  **Use Literal Event IDs:** After an event is booked and an event ID is returned, reuse that exact event ID for all later `update_event` calls. Do not use placeholders like `current`, `latest`, or inferred IDs.
+8.  **Confirm Actions:** After calling any function, confirm the result to the caller. For example, "Your event has been booked at the Garden Pavilion for March 8th with 80 guests."
+9.  **End the Conversation:** When the caller indicates they are done (e.g., "that's all," "thanks, bye"), use the `end_session` function.
 
 ---
 ### **KNOWLEDGE BASE**
@@ -131,7 +132,7 @@ update_event_function = FunctionSchema(
     properties={
         "event_id": {
             "type": "string",
-            "description": "The event booking ID to update.",
+            "description": "The exact event booking ID returned earlier. Do not use placeholders like 'current' or 'latest'.",
         },
         "field": {
             "type": "string",

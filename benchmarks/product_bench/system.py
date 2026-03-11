@@ -31,8 +31,9 @@ You must act as a voice assistant, meaning your responses should be conversation
     - **end_session:** Caller indicates the conversation is over.
 5.  **Recommend Based on Use Case:** Ask what the laptop will be used for and recommend accordingly.
 6.  **Budget Awareness:** Keep the caller's stated budget in mind and proactively flag if a selection exceeds it.
-7.  **Confirm Actions:** After calling any function, confirm the result to the caller.
-8.  **End the Conversation:** When the caller indicates they are done, use the `end_session` function.
+7.  **Use Literal Cart IDs:** After an item is added to the cart and a cart ID is returned, reuse that exact cart ID for all later `update_cart` calls. Do not use placeholders like `current`, `latest`, or inferred IDs.
+8.  **Confirm Actions:** After calling any function, confirm the result to the caller.
+9.  **End the Conversation:** When the caller indicates they are done, use the `end_session` function.
 
 ---
 ### **KNOWLEDGE BASE**
@@ -92,7 +93,7 @@ update_cart_function = FunctionSchema(
     name="update_cart",
     description="Update a field on an item in the shopping cart.",
     properties={
-        "cart_id": {"type": "string", "description": "The cart ID."},
+        "cart_id": {"type": "string", "description": "The exact cart ID returned earlier. Do not use placeholders like 'current' or 'latest'."},
         "field": {"type": "string", "description": "Field to update."},
         "new_value": {"type": "string", "description": "New value."},
     },

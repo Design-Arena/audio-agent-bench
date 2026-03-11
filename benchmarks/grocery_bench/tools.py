@@ -52,7 +52,7 @@ update_order_function = FunctionSchema(
     properties={
         "order_id": {
             "type": "string",
-            "description": "The order ID to update.",
+            "description": "The exact order ID returned earlier. Do not use placeholders like 'current' or 'latest'.",
         },
         "action": {
             "type": "string",
@@ -77,7 +77,7 @@ verify_details_function = FunctionSchema(
     properties={
         "order_id": {
             "type": "string",
-            "description": "The order ID to verify.",
+            "description": "The exact order ID returned earlier. Do not use placeholders like 'current' or 'latest'.",
         },
     },
     required=["order_id"],
