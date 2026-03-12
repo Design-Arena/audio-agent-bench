@@ -23,8 +23,8 @@ from .llm_judge import (
 )
 
 
-OPENAI_JUDGE_VERSION = "openai-v6-kb-lenient-present-tense"
-OPENAI_REHYDRATED_JUDGE_VERSION = "openai-v6-rehydrated-kb-lenient-present-tense"
+OPENAI_JUDGE_VERSION = "openai-v8-kb-visible-vs-tool-only"
+OPENAI_REHYDRATED_JUDGE_VERSION = "openai-v8-rehydrated-kb-visible-vs-tool-only"
 OPENAI_JUDGE_MODEL = "gpt-5.2"
 
 
@@ -37,6 +37,7 @@ async def judge_with_openai(
     get_relevant_dimensions_fn=None,
     model: Optional[str] = None,
     kb_text: Optional[str] = None,
+    prompt_visible_kb_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Main judging function using OpenAI with mode-aware scoring.
 
@@ -48,7 +49,8 @@ async def judge_with_openai(
         skip_turn_taking: If True, skip turn-taking analysis
         get_relevant_dimensions_fn: Function to get relevant scoring dimensions for a turn.
         model: OpenAI model to use. Defaults to OPENAI_JUDGE_MODEL.
-        kb_text: Optional knowledge base text for kb_grounding verification.
+        kb_text: Optional full oracle knowledge base text for kb_grounding verification.
+        prompt_visible_kb_text: Optional prompt-visible KB text that the assistant saw.
 
     Returns:
         Dict with judgments, realignment_notes, function_tracking, turn_taking_analysis, summary, and model_name.
@@ -112,6 +114,7 @@ async def judge_with_openai(
     formatted_turns = format_turns_for_judge(
         records, expected_turns, only_turns, turn_taking_data,
         get_relevant_dimensions_fn, kb_text=kb_text,
+        prompt_visible_kb_text=prompt_visible_kb_text,
     )
 
     prompt = build_judge_user_prompt(

@@ -142,6 +142,16 @@ def load_benchmark_kb_text(name: str) -> Optional[str]:
     return kb_path.read_text(encoding="utf-8")
 
 
+def load_prompt_visible_kb_text(name: str) -> Optional[str]:
+    """Load the prompt-visible KB text exposed by a benchmark system module."""
+    try:
+        module = importlib.import_module(f"benchmarks.{name}.system")
+    except ModuleNotFoundError:
+        return None
+
+    return getattr(module, "prompt_visible_knowledge_base", None)
+
+
 def get_pipeline_class(pipeline_type: str) -> type:
     """Load pipeline class by type name."""
     class_name = PIPELINE_CLASSES.get(pipeline_type)
@@ -743,6 +753,7 @@ def judge(
     # Load benchmark for expected turns and get_relevant_dimensions
     get_relevant_dimensions_fn = None
     kb_text = None
+    prompt_visible_kb_text = None
     try:
         BenchmarkConfig = load_benchmark(benchmark_name)
         benchmark = BenchmarkConfig()
@@ -750,6 +761,7 @@ def judge(
         benchmark_turns_module = importlib.import_module(f"benchmarks.{benchmark_name}.turns")
         get_relevant_dimensions_fn = getattr(benchmark_turns_module, 'get_relevant_dimensions', None)
         kb_text = load_benchmark_kb_text(benchmark_name)
+        prompt_visible_kb_text = load_prompt_visible_kb_text(benchmark_name)
     except Exception:
         click.echo(f"Could not load benchmark '{benchmark_name}', using shared turns module")
         from benchmarks.conversation_bench.turns import turns as expected_turns
@@ -776,6 +788,7 @@ def judge(
                     get_relevant_dimensions_fn=get_relevant_dimensions_fn,
                     model=judge_model,
                     kb_text=kb_text,
+                    prompt_visible_kb_text=prompt_visible_kb_text,
                 )
             )
         except Exception as e:
@@ -811,6 +824,7 @@ def judge(
                     skip_turn_taking=skip_turn_taking,
                     get_relevant_dimensions_fn=get_relevant_dimensions_fn,
                     kb_text=kb_text,
+                    prompt_visible_kb_text=prompt_visible_kb_text,
                 )
             )
         except Exception as e:

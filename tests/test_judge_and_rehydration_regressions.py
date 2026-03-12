@@ -134,6 +134,37 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
         self.assertIn("**Tool Use Guidance**:", formatted)
         self.assertIn("reuse the already-established item facts", formatted)
 
+    def test_format_turns_for_judge_distinguishes_prompt_visible_and_full_kb(self):
+        records = [
+            {
+                "turn": 0,
+                "user_text": "Do you have a bouquet?",
+                "assistant_text": "I know we carry floral items, but let me look up the bouquet details.",
+                "tool_calls": [],
+                "tool_results": [],
+            }
+        ]
+        expected_turns = [
+            {
+                "golden_text": "Fresh Flower Bouquet, mixed seasonal for thirty-four ninety-nine.",
+                "required_function_call": {"name": "lookup_item", "args": {"query": "flower bouquet"}},
+                "categories": ["tool_use"],
+            }
+        ]
+
+        formatted = format_turns_for_judge(
+            records,
+            expected_turns,
+            get_relevant_dimensions_fn=lambda _: ["instruction_following", "kb_grounding", "tool_use_correct"],
+            kb_text="## Full KB\nFresh Flower Bouquet | mixed seasonal | $34.99",
+            prompt_visible_kb_text="## Prompt KB\n### Floral\n- Fresh Flower Bouquet",
+        )
+
+        self.assertIn("# Prompt-Visible Knowledge Base", formatted)
+        self.assertIn("# Full Benchmark Knowledge Base", formatted)
+        self.assertIn("Fresh Flower Bouquet | mixed seasonal | $34.99", formatted)
+        self.assertIn("### Floral", formatted)
+
     def test_judge_prompt_allows_non_material_extra_grounded_commentary(self):
         prompt = build_judge_system_prompt(cross_turn_realignment=False)
 
@@ -150,6 +181,18 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
             prompt,
         )
         self.assertIn("we should be good for same-day delivery", prompt)
+        self.assertIn(
+            "Do NOT fail kb_grounding just because the assistant lacks a hidden catalog detail",
+            prompt,
+        )
+        self.assertIn(
+            "If the prompt-visible KB says the store carries floral items",
+            prompt,
+        )
+        self.assertIn(
+            '"I don\'t have the bouquet details on hand" before a lookup is not, by itself, a grounding failure',
+            prompt,
+        )
 
     def test_text_pipeline_rehydration_keeps_tool_history_in_system_prompt(self):
         pipeline = TextPipeline(DummyBenchmark())

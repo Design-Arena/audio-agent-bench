@@ -43,8 +43,8 @@ except ImportError:
 # Configuration
 # ============================================================================
 
-JUDGE_VERSION = "claude-agent-sdk-v14-kb-lenient-present-tense"
-REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v14-rehydrated-kb-lenient-present-tense"
+JUDGE_VERSION = "claude-agent-sdk-v16-kb-visible-vs-tool-only"
+REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v16-rehydrated-kb-visible-vs-tool-only"
 JUDGE_MODEL = "claude-opus-4-5"
 
 # System prompt for the two-phase judge
@@ -112,14 +112,19 @@ For each turn, evaluate SIX dimensions:
    - **IMPORTANT**: If a turn has turn_taking=FALSE, be lenient on instruction_following since garbled audio may cause transcription issues
 
 4. **kb_grounding** (bool):
-   - The Knowledge Base (provided at the top of the input) is the source of truth for factual grounding, NOT the golden text alone
-   - TRUE if the assistant's response is factually consistent with the Knowledge Base, prior conversation state, and successful tool results shown in the input
-   - TRUE if the assistant provides additional correct details from the Knowledge Base that go beyond the golden text — do NOT penalize this
+   - The prompt includes two KB views when available:
+     - **Prompt-Visible Knowledge Base**: what the assistant actually saw before any tool call
+     - **Full Benchmark Knowledge Base**: oracle / tool-only facts that may be hidden from the assistant until lookup
+   - For **pre-tool claims**, judge grounding against the Prompt-Visible Knowledge Base, prior conversation state, and any already-returned tool results
+   - For **post-tool claims** or turns where the assistant already retrieved the needed item, also use successful tool results and the Full Benchmark Knowledge Base
+   - Do NOT fail kb_grounding just because the assistant lacks a hidden catalog detail that only exists in the Full Benchmark Knowledge Base; in that case the issue is usually tool use or uncertainty handling, not grounding
+   - TRUE if the assistant's response is factually consistent with the accessible evidence for that turn
+   - TRUE if the assistant provides additional correct details from the visible KB, full KB, or tool results that go beyond the golden text — do NOT penalize this
    - TRUE if the assistant adds a reasonable conversational detail or present-tense commentary that is not explicitly spelled out in the Knowledge Base, as long as it does not contradict the provided evidence and does not materially change the answer
    - TRUE when the assistant correctly states the core KB policy and then adds light present-tense operational commentary such as "we should be good" or "it should still work today," unless the input provides contrary time/status evidence
    - TRUE if the turn depends on an action that never executed due to a cascade failure and the assistant does not fabricate information about that action
-   - FALSE only for clear factual contradictions with the Knowledge Base (wrong dates, times, locations, speakers, prices, names)
-   - FALSE for unsupported extra details only when they materially change the user-facing facts or conflict with the Knowledge Base, transcript, or tool results
+   - FALSE only for clear factual contradictions with the evidence the assistant had or just retrieved (wrong dates, times, locations, speakers, prices, names)
+   - FALSE for unsupported extra details only when they materially change the user-facing facts or conflict with the visible KB, full KB, transcript, or tool results
 
 5. **ambiguity_handling** (bool):
    - ONLY scored for turns where "Score Dimensions" includes "ambiguity_handling"
@@ -221,6 +226,8 @@ The golden_text is the *ideal* response for evaluation purposes. Apply these pri
 - **Extra correct details**: Do NOT fail an assistant for adding correct details from the KB that go beyond the golden text (e.g., mentioning a clinic address, parking info, or a related event). Only fail kb_grounding if the extra detail is factually wrong.
 - **Non-material extra commentary**: Do NOT fail kb_grounding just because an extra phrase is not literally stated in the KB or golden text, if it is a reasonable non-contradictory add-on and does not change the substantive answer.
 - **Present-tense delivery commentary example**: If the assistant correctly states a same-day delivery cutoff from the KB and then adds a light phrase like "we should be good for same-day delivery," treat that as acceptable unless the input includes contrary time evidence.
+- **Hidden-catalog example**: If the prompt-visible KB says the store carries floral items but the exact bouquet SKU/price only exists in the full oracle KB, do NOT fail kb_grounding merely because the assistant says it lacks the bouquet details before calling a lookup tool. Penalize the missed lookup or an incorrect stronger claim instead.
+- **Missing-details vs false-unavailability**: "I don't have the bouquet details on hand" before a lookup is not, by itself, a grounding failure when the detailed catalog is hidden. "We don't carry bouquets" or "there is no bouquet listing" is a grounding failure.
 - **Missing optional details**: When the golden text includes supplementary facts beyond what the user directly asked (e.g., room number when user asked about time, or a related event on a different day), do NOT require the assistant to include those unless they are essential to answering the user's actual question.
 - **Consistency**: Apply the same tolerance for extra/missing details across all runs of the same turn. If a supplementary detail is optional in one run, it must be optional in all runs.
 
@@ -435,7 +442,7 @@ def build_judge_summary(turn_count: int, cross_turn_realignment: bool) -> str:
 
 
 def load_benchmark_kb_text(benchmark_name: str) -> Optional[str]:
-    """Load benchmark knowledge base text when the benchmark provides one."""
+    """Load the benchmark's full oracle KB text when available."""
     try:
         module = importlib.import_module(f"benchmarks.{benchmark_name}.config")
     except ModuleNotFoundError:
@@ -452,6 +459,16 @@ def load_benchmark_kb_text(benchmark_name: str) -> Optional[str]:
     return kb_path.read_text(encoding="utf-8")
 
 
+def load_prompt_visible_kb_text(benchmark_name: str) -> Optional[str]:
+    """Load the prompt-visible KB text the assistant actually sees, when exposed."""
+    try:
+        module = importlib.import_module(f"benchmarks.{benchmark_name}.system")
+    except ModuleNotFoundError:
+        return None
+
+    return getattr(module, "prompt_visible_knowledge_base", None)
+
+
 # ============================================================================
 # Turn Formatting
 # ============================================================================
@@ -463,6 +480,7 @@ def format_turns_for_judge(
     turn_taking_data: Optional[Dict[int, Dict[str, Any]]] = None,
     get_relevant_dimensions_fn=None,
     kb_text: Optional[str] = None,
+    prompt_visible_kb_text: Optional[str] = None,
 ) -> str:
     """Format conversation turns with full context for realignment analysis.
 
@@ -473,13 +491,23 @@ def format_turns_for_judge(
         turn_taking_data: Optional dict mapping turn index to turn-taking analysis
         get_relevant_dimensions_fn: Function to get relevant scoring dimensions for a turn.
             If not provided, falls back to conversation_bench.
-        kb_text: Optional knowledge base text. When provided, prepended as a reference
-            section so the judge can verify kb_grounding against the actual source of truth.
+        kb_text: Optional full oracle knowledge base text.
+        prompt_visible_kb_text: Optional prompt-visible knowledge base text. When
+            provided, prepended so the judge can distinguish what the assistant
+            actually saw from hidden tool-only facts.
     """
     lines = []
 
+    if prompt_visible_kb_text:
+        lines.append("# Prompt-Visible Knowledge Base (What the Assistant Actually Saw)")
+        lines.append("")
+        lines.append(prompt_visible_kb_text.strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     if kb_text:
-        lines.append("# Knowledge Base (Source of Truth for KB Grounding)")
+        lines.append("# Full Benchmark Knowledge Base (Oracle / Tool-Only Facts)")
         lines.append("")
         lines.append(kb_text.strip())
         lines.append("")
@@ -622,6 +650,7 @@ async def judge_with_claude(
     skip_turn_taking: bool = False,
     get_relevant_dimensions_fn=None,
     kb_text: Optional[str] = None,
+    prompt_visible_kb_text: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Main judging function using mode-aware scoring.
 
@@ -632,7 +661,8 @@ async def judge_with_claude(
         expected_turns: Optional list of expected turns. If not provided, imports from turns module.
         skip_turn_taking: If True, skip turn-taking analysis (for runs without WAV files)
         get_relevant_dimensions_fn: Function to get relevant scoring dimensions for a turn.
-        kb_text: Optional knowledge base text for kb_grounding verification.
+        kb_text: Optional full oracle knowledge base text for kb_grounding verification.
+        prompt_visible_kb_text: Optional prompt-visible KB text that the assistant saw.
 
     Returns:
         Dict with judgments, realignment_notes, function_tracking, turn_taking_analysis, summary, and model_name.
@@ -689,6 +719,7 @@ async def judge_with_claude(
     formatted_turns = format_turns_for_judge(
         records, expected_turns, only_turns, turn_taking_data,
         get_relevant_dimensions_fn, kb_text=kb_text,
+        prompt_visible_kb_text=prompt_visible_kb_text,
     )
 
     prompt = build_judge_user_prompt(
@@ -1128,6 +1159,7 @@ def main():
     # Load expected turns and get_relevant_dimensions for the correct benchmark
     get_relevant_dimensions_fn = None
     kb_text = None
+    prompt_visible_kb_text = None
     try:
         benchmark_name = run_dir.parent.name
         from audio_arena.cli import load_benchmark
@@ -1135,6 +1167,7 @@ def main():
         expected_turns = load_benchmark(benchmark_name).turns
         get_relevant_dimensions_fn = getattr(benchmark_module, 'get_relevant_dimensions', None)
         kb_text = load_benchmark_kb_text(benchmark_name)
+        prompt_visible_kb_text = load_prompt_visible_kb_text(benchmark_name)
     except Exception:
         from benchmarks.conversation_bench.turns import turns as expected_turns
 
@@ -1147,6 +1180,7 @@ def main():
                 args.debug,
                 get_relevant_dimensions_fn=get_relevant_dimensions_fn,
                 kb_text=kb_text,
+                prompt_visible_kb_text=prompt_visible_kb_text,
             )
         )
     except Exception as e:

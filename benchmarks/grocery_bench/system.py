@@ -1,4 +1,5 @@
 """System instruction for the grocery benchmark."""
+import re
 from pathlib import Path
 
 _PREAMBLE = """
@@ -106,17 +107,88 @@ verify_details_function = FunctionSchema(
 """
 
 
-def _load_knowledge_base() -> str:
-    """Load the prompt-facing knowledge base from the data directory.
-
-    Keep store and policy facts in the system prompt, but omit the product
-    catalog and confusable-item reference so first-discovery item turns still
-    need `lookup_item` for exact names, sizes, and prices.
-    """
+def load_full_knowledge_base() -> str:
+    """Load the benchmark's full oracle KB from disk."""
     data_dir = Path(__file__).parent / "data"
     kb_path = data_dir / "knowledge_base.txt"
-    kb_text = kb_path.read_text(encoding="utf-8")
+    return kb_path.read_text(encoding="utf-8")
 
+
+def _build_product_index(kb_text: str) -> str:
+    """Render a prompt-visible catalog index with names only.
+
+    The assistant may know which products exist and which names are commonly
+    confused, but exact sizes, prices, and item numbers must still come from
+    `lookup_item`.
+    """
+    product_catalog_start = kb_text.find("## Product Catalog")
+    confusable_start = kb_text.find("## Confusable Items Reference")
+
+    if product_catalog_start == -1 or confusable_start == -1:
+        return ""
+
+    catalog_body = kb_text[product_catalog_start:confusable_start].strip().splitlines()
+    lines = ["## Product Index", ""]
+    current_category = None
+
+    for raw_line in catalog_body:
+        line = raw_line.strip()
+        if not line or line == "## Product Catalog":
+            continue
+        if line.startswith("### "):
+            current_category = line
+            lines.append(current_category)
+            continue
+        if line.startswith("| Item #") or line.startswith("|--------"):
+            continue
+        if line.startswith("|"):
+            parts = [part.strip() for part in line.strip("|").split("|")]
+            if len(parts) >= 2:
+                product_name = parts[1]
+                lines.append(f"- {product_name}")
+
+    return "\n".join(lines).rstrip()
+
+
+def _build_confusable_index(kb_text: str) -> str:
+    """Render confusable-name hints without leaking IDs, sizes, or prices."""
+    confusable_start = kb_text.find("## Confusable Items Reference")
+    delivery_info_start = kb_text.find("## Delivery Information")
+
+    if confusable_start == -1 or delivery_info_start == -1:
+        return ""
+
+    confusable_lines = kb_text[confusable_start:delivery_info_start].strip().splitlines()
+    lines = ["## Confusable Items Reference"]
+
+    for raw_line in confusable_lines:
+        line = raw_line.strip()
+        if not line or line == "## Confusable Items Reference":
+            continue
+        if not line.startswith("- "):
+            continue
+
+        # Remove item numbers, prices, and size shorthand while keeping names
+        # and the reason the pair is easily confused.
+        line = re.sub(r"\s*\(#\d+,\s*\$[^)]*\)", "", line)
+        line = re.sub(r"\s*\(#\d+\)", "", line)
+        if "Item #" in line and ":" in line:
+            _, remainder = line.split(":", 1)
+            pair_text = remainder.split("—", 1)[0].strip()
+            line = re.sub(r"- \*\*Item #[^:]+:\*\*", f"- **{pair_text}:**", line, count=1)
+        lines.append(line)
+
+    return "\n".join(lines).rstrip()
+
+
+def load_prompt_visible_knowledge_base() -> str:
+    """Load the prompt-facing KB shown to the assistant.
+
+    Keep store and policy facts plus a names-only product index. Exact sizes,
+    prices, and item IDs stay tool-only so first-discovery turns still need
+    `lookup_item` for grounded answers.
+    """
+    kb_text = load_full_knowledge_base()
     product_catalog_start = kb_text.find("## Product Catalog")
     delivery_info_start = kb_text.find("## Delivery Information")
 
@@ -124,8 +196,18 @@ def _load_knowledge_base() -> str:
         return kb_text
 
     before_catalog = kb_text[:product_catalog_start].rstrip()
+    product_index = _build_product_index(kb_text)
+    confusable_index = _build_confusable_index(kb_text)
     after_catalog = kb_text[delivery_info_start:].lstrip()
-    return f"{before_catalog}\n\n{after_catalog}"
+
+    sections = [
+        before_catalog,
+        product_index,
+        confusable_index,
+        after_catalog,
+    ]
+    return "\n\n".join(section for section in sections if section).rstrip()
 
 
-system_instruction = _PREAMBLE + _load_knowledge_base() + _TOOLS_SECTION
+prompt_visible_knowledge_base = load_prompt_visible_knowledge_base()
+system_instruction = _PREAMBLE + prompt_visible_knowledge_base + _TOOLS_SECTION
