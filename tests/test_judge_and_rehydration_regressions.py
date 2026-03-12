@@ -6,10 +6,16 @@ from unittest.mock import AsyncMock, Mock, patch
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.services.openai.realtime import events as rt_events
 
-from audio_arena.judging.llm_judge import build_judge_system_prompt, format_turns_for_judge
+from audio_arena.judging.llm_judge import (
+    build_judge_system_prompt,
+    build_judge_user_prompt,
+    format_rehydrated_turns_for_judge,
+    format_turns_for_judge,
+)
 from audio_arena.pipelines.openai_realtime import OpenAIRealtimeLLMServiceExplicitToolResult
 from audio_arena.pipelines.realtime import RealtimePipeline
 from audio_arena.pipelines.text import TextPipeline
+from benchmarks.product_bench.turns import turns as product_turns
 
 
 class DummyBenchmark:
@@ -20,6 +26,27 @@ class DummyBenchmark:
 
 
 class JudgeAndRehydrationRegressionTests(unittest.TestCase):
+    def test_product_bench_checkout_flow_only_requests_phone_before_add_to_cart(self):
+        turn_20 = product_turns[20]
+        turn_21 = product_turns[21]
+
+        self.assertIn("phone number", turn_20["golden_text"].lower())
+        self.assertNotIn("campus address", turn_20["golden_text"].lower())
+        self.assertEqual(
+            turn_21["required_function_call"],
+            {
+                "name": "add_to_cart",
+                "args": {
+                    "product_id": "X1940",
+                    "customer_name": "Ryan Chen",
+                    "phone": "201-473-1560",
+                    "condition": "open_box",
+                    "warranty": "accidental_damage",
+                    "student_discount": False,
+                },
+            },
+        )
+
     def test_multi_call_tool_responses_match_by_args_not_call_order(self):
         benchmark = DummyBenchmark()
         benchmark.turns = [
@@ -164,6 +191,69 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
         self.assertIn("# Full Benchmark Knowledge Base", formatted)
         self.assertIn("Fresh Flower Bouquet | mixed seasonal | $34.99", formatted)
         self.assertIn("### Floral", formatted)
+
+    def test_format_rehydrated_turns_for_judge_uses_golden_history_not_prior_actual_turns(self):
+        records = [
+            {
+                "turn": 0,
+                "user_text": "register me for Kevin Zhang",
+                "assistant_text": "What name should I use for that registration?",
+                "tool_calls": [],
+                "tool_results": [],
+            },
+            {
+                "turn": 1,
+                "user_text": "What am I registered for?",
+                "assistant_text": "You are registered for Kevin Zhang.",
+                "tool_calls": [],
+                "tool_results": [],
+            },
+        ]
+        expected_turns = [
+            {
+                "input": "register me for Kevin Zhang",
+                "golden_text": "I've registered you for Kevin Zhang.",
+                "required_function_call": {
+                    "name": "register_for_session",
+                    "args": {"name": "Jennifer Smith", "session_id": "916303"},
+                },
+                "function_call_response": {"status": "success"},
+                "categories": ["tool_use", "long_range_memory"],
+            },
+            {
+                "input": "What am I registered for?",
+                "golden_text": "You're registered for Kevin Zhang.",
+                "required_function_call": None,
+                "categories": ["long_range_memory"],
+            },
+        ]
+
+        formatted = format_rehydrated_turns_for_judge(
+            records,
+            expected_turns,
+            only_turns={1},
+            get_relevant_dimensions_fn=lambda turn: ["instruction_following", "kb_grounding", "state_tracking"]
+            if "long_range_memory" in turn.get("categories", [])
+            else ["instruction_following", "kb_grounding", "tool_use_correct"],
+        )
+
+        self.assertIn("# Hydrated Golden Conversation History", formatted)
+        self.assertIn("### Golden Turn 0", formatted)
+        self.assertIn("**Assistant (Golden)**: I've registered you for Kevin Zhang.", formatted)
+        self.assertNotIn("What name should I use for that registration?", formatted)
+        self.assertIn("## Turn 1", formatted)
+        self.assertIn("**Assistant**: You are registered for Kevin Zhang.", formatted)
+
+    def test_rehydrated_judge_user_prompt_explicitly_uses_hydrated_history(self):
+        prompt = build_judge_user_prompt(
+            "## Turn 52\n**Hydrated Prior Context**: Golden Turns 0-51",
+            [52],
+            cross_turn_realignment=False,
+        )
+
+        self.assertIn('Use the "Hydrated Golden Conversation History" section as the ONLY source of prior-turn state', prompt)
+        self.assertIn("only Golden Turns with index < N count as prior state", prompt)
+        self.assertIn("Do NOT use the actual transcript content from one target turn block as prior state", prompt)
 
     def test_judge_prompt_allows_non_material_extra_grounded_commentary(self):
         prompt = build_judge_system_prompt(cross_turn_realignment=False)

@@ -340,9 +340,8 @@ turns = [
                 "standard warranty, same as new. I'll add accidental "
                 "damage protection at $79 per year — covers drops, "
                 "spills, and cracked screens. Great for a college "
-                "student. Got it — Ryan Chen, C-H-E-N. For shipping "
-                "to school, I'll need the campus address. What's the "
-                "address and a good phone number?",
+                "student. Got it — Ryan Chen, C-H-E-N. I'll just need "
+                "a good phone number for the order.",
  'required_function_call': None,
  'categories': ['basic_qa', 'long_range_memory'],
  'audio_file': 'audio/turn_020.wav'},

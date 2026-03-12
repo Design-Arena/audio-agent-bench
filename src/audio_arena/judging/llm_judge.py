@@ -411,8 +411,8 @@ Remember:
     else:
         instructions = f"""Please evaluate each turn independently:
 1. Analyze each turn against its golden expectation
-2. Do NOT shift tool-use credit across turns for early or late function calls
-3. Keep the penalty absorption rule within the current turn only
+2. Use the "Hydrated Golden Conversation History" section as the ONLY source of prior-turn state
+3. Do NOT use the actual transcript content from one target turn block as prior state for any other turn
 4. Output the final JSON with judgments for ALL {turn_count} turns
 
 CRITICAL: Your final_judgments array MUST contain exactly {turn_count} entries, one for each of these exact turn IDs:
@@ -421,8 +421,10 @@ CRITICAL: Your final_judgments array MUST contain exactly {turn_count} entries, 
 Do NOT renumber turns. Use the actual turn IDs shown above, even if they are non-contiguous or do not start at 0.
 
 Remember:
-- This is a rehydrated run. Each turn stands on its own, so do NOT mark tool_use_correct=TRUE because the expected call happened in another turn
-- Do NOT retroactively credit a turn because a function was called later in a different turn
+- This is a rehydrated run. Each turn stands on its own with hydrated golden prior context
+- For target turn N, only Golden Turns with index < N count as prior state. Golden Turns with index >= N are future turns for that target and must be ignored
+- Do NOT mark tool_use_correct=TRUE because the expected call happened in another actual transcript turn
+- Do NOT retroactively credit a turn because a function was called later in a different actual transcript turn
 - **Penalty absorption rule**: When a tool call is missed due to a more specific root cause within the same turn, the penalty lands on the specific dimension (ambiguity_handling or state_tracking) if it's in Score Dimensions. If the specific dimension is NOT in Score Dimensions, fall back to tool_use_correct=FALSE. The penalty must always land somewhere.
 - Missing/wrong tool call (not over-clarification or state failure) → tool_use_correct=FALSE only; do not fail instruction_following
 - Words contradict actions (e.g. says "I'll wait" but calls in same turn) → tool_use_correct=FALSE and instruction_following=FALSE
@@ -531,10 +533,12 @@ def format_turns_for_judge(
             lines.append("---")
             lines.append("")
 
-    # Provide a summary of all expected function calls
+    # Provide a summary of expected function calls for the turns under review
     lines.append("# Expected Function Calls Summary")
     lines.append("")
     for i, exp in enumerate(expected_turns):
+        if only_turns is not None and i not in only_turns:
+            continue
         fc = exp.get('required_function_call')
         if fc:
             # Handle both single function call (dict) and multi-step chains (list)
@@ -638,6 +642,198 @@ def format_turns_for_judge(
     return "\n".join(lines)
 
 
+def format_rehydrated_turns_for_judge(
+    records: List[Dict[str, Any]],
+    expected_turns: List[Dict[str, Any]],
+    only_turns: Optional[set[int]] = None,
+    turn_taking_data: Optional[Dict[int, Dict[str, Any]]] = None,
+    get_relevant_dimensions_fn=None,
+    kb_text: Optional[str] = None,
+    prompt_visible_kb_text: Optional[str] = None,
+) -> str:
+    """Format rehydrated turns using hydrated golden history, not prior actual transcript state."""
+    filtered_records = [
+        rec for rec in records if only_turns is None or rec["turn"] in only_turns
+    ]
+    if not filtered_records:
+        return ""
+
+    lines: List[str] = []
+
+    if prompt_visible_kb_text:
+        lines.append("# Prompt-Visible Knowledge Base (What the Assistant Actually Saw)")
+        lines.append("")
+        lines.append(prompt_visible_kb_text.strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    if kb_text:
+        lines.append("# Full Benchmark Knowledge Base (Oracle / Tool-Only Facts)")
+        lines.append("")
+        lines.append(kb_text.strip())
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    if turn_taking_data:
+        failed_turns = [
+            idx for idx, data in turn_taking_data.items() if not data.get("turn_taking", True)
+        ]
+        if failed_turns:
+            lines.append("# Turn-Taking Failures (Pre-computed from Audio Analysis)")
+            lines.append("")
+            lines.append("The following turns have audio timing issues that may affect transcription quality:")
+            for idx in sorted(failed_turns):
+                issues = turn_taking_data[idx].get("issues", [])
+                lines.append(f"- Turn {idx}: {', '.join(issues) if issues else 'timing issue'}")
+            lines.append("")
+            lines.append("For these turns, set `turn_taking: false` in your output.")
+            lines.append("Be lenient on `instruction_following` for turns with turn_taking failures.")
+            lines.append("")
+            lines.append("---")
+            lines.append("")
+
+    lines.append("# Expected Function Calls Summary")
+    lines.append("")
+    for i, exp in enumerate(expected_turns):
+        if only_turns is not None and i not in only_turns:
+            continue
+        fc = exp.get("required_function_call")
+        if fc:
+            if isinstance(fc, list):
+                calls_str = " → ".join(f"{c['name']}({json.dumps(c['args'])})" for c in fc)
+                lines.append(f"- Turn {i}: [MULTI-STEP] {calls_str}")
+            else:
+                lines.append(f"- Turn {i}: {fc['name']}({json.dumps(fc['args'])})")
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    max_target_turn = max(rec["turn"] for rec in filtered_records)
+    lines.append("# Hydrated Golden Conversation History")
+    lines.append("")
+    lines.append(
+        "This section is the golden prior context used to hydrate rehydrated benchmark turns."
+    )
+    lines.append(
+        "When judging target turn N, use only Golden Turns with index less than N as prior conversation state."
+    )
+    lines.append(
+        "Do NOT use actual transcript content from one target turn block as prior state for another target turn."
+    )
+    lines.append("")
+
+    for turn_idx in range(min(max_target_turn, len(expected_turns))):
+        expected = expected_turns[turn_idx]
+        lines.append(f"### Golden Turn {turn_idx}")
+        lines.append(f"**User**: {expected.get('input', '')}")
+
+        fc = expected.get("required_function_call")
+        fc_response = expected.get("function_call_response")
+        if fc is not None:
+            calls = fc if isinstance(fc, list) else [fc]
+            responses = (
+                fc_response
+                if isinstance(fc_response, list)
+                else [fc_response] if fc_response is not None else []
+            )
+            for idx, call in enumerate(calls):
+                lines.append(
+                    f"  [Hydrated tool call: {call['name']}({json.dumps(call.get('args', {}))})]"
+                )
+                if idx < len(responses):
+                    lines.append(
+                        f"  [Hydrated tool result: {json.dumps(responses[idx])}]"
+                    )
+
+        lines.append(f"**Assistant (Golden)**: {expected.get('golden_text', '')}")
+        lines.append("")
+
+    lines.append("---")
+    lines.append("")
+    lines.append("# Target Turn Evaluations")
+    lines.append("")
+
+    for rec in filtered_records:
+        turn_idx = rec["turn"]
+        if turn_idx >= len(expected_turns):
+            continue
+
+        expected = expected_turns[turn_idx]
+        lines.append(f"## Turn {turn_idx}")
+
+        if turn_taking_data and turn_idx in turn_taking_data:
+            tt_data = turn_taking_data[turn_idx]
+            tt_ok = tt_data.get("turn_taking", True)
+            if not tt_ok:
+                issues = tt_data.get("issues", [])
+                lines.append(f"**Turn-Taking**: FAILURE ({', '.join(issues)})")
+            else:
+                lines.append("**Turn-Taking**: OK")
+        else:
+            lines.append("**Turn-Taking**: OK (no audio analysis)")
+
+        if turn_idx == 0:
+            lines.append("**Hydrated Prior Context**: none (this is the first turn)")
+        else:
+            lines.append(
+                f"**Hydrated Prior Context**: Golden Turns 0-{turn_idx - 1} from the shared hydrated history above"
+            )
+        lines.append(f"**User**: {rec['user_text']}")
+        lines.append(f"**Assistant**: {rec['assistant_text']}")
+        lines.append("")
+
+        golden = expected.get("golden_text", "")
+        if golden:
+            lines.append(f"**Golden Response**: {golden}")
+            lines.append("")
+
+        categories = expected.get("categories", [])
+        if not categories and expected.get("category"):
+            categories = [expected["category"]]
+        if categories:
+            lines.append(f"**Category**: {', '.join(categories)}")
+            subcategory = expected.get("subcategory", "")
+            if subcategory:
+                lines.append(f"**Subcategory**: {subcategory}")
+            dims_fn = get_relevant_dimensions_fn
+            if dims_fn is None:
+                from benchmarks.conversation_bench.turns import get_relevant_dimensions
+                dims_fn = get_relevant_dimensions
+            relevant_dims = dims_fn(expected)
+            lines.append(f"**Score Dimensions**: {', '.join(relevant_dims)}")
+            lines.append("")
+
+        expected_fc = expected.get("required_function_call")
+        if expected_fc:
+            lines.append(f"**Expected Function**: {json.dumps(expected_fc)}")
+        else:
+            lines.append("**Expected Function**: none")
+
+        tool_use_guidance = expected.get("tool_use_guidance")
+        if tool_use_guidance:
+            lines.append(f"**Tool Use Guidance**: {tool_use_guidance}")
+
+        actual_calls = rec.get("tool_calls", [])
+        if actual_calls:
+            lines.append(f"**Actual Functions**: {json.dumps(actual_calls)}")
+        else:
+            lines.append("**Actual Functions**: none")
+
+        actual_results = rec.get("tool_results", [])
+        if actual_results:
+            lines.append(f"**Actual Function Results**: {json.dumps(actual_results)}")
+        else:
+            lines.append("**Actual Function Results**: none")
+
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
 # ============================================================================
 # Claude Judge
 # ============================================================================
@@ -716,7 +912,10 @@ async def judge_with_claude(
                     print(f"Turn-taking analysis failed: {e}", file=sys.stderr)
 
     # Format turns (with turn-taking data and KB if available)
-    formatted_turns = format_turns_for_judge(
+    formatter = (
+        format_turns_for_judge if cross_turn_realignment else format_rehydrated_turns_for_judge
+    )
+    formatted_turns = formatter(
         records, expected_turns, only_turns, turn_taking_data,
         get_relevant_dimensions_fn, kb_text=kb_text,
         prompt_visible_kb_text=prompt_visible_kb_text,

@@ -18,6 +18,7 @@ from .llm_judge import (
     build_judge_system_prompt,
     build_judge_user_prompt,
     format_turns_for_judge,
+    format_rehydrated_turns_for_judge,
     load_transcript,
     uses_cross_turn_realignment,
 )
@@ -111,7 +112,10 @@ async def judge_with_openai(
                 if debug:
                     print(f"Turn-taking analysis failed: {e}", file=sys.stderr)
 
-    formatted_turns = format_turns_for_judge(
+    formatter = (
+        format_turns_for_judge if cross_turn_realignment else format_rehydrated_turns_for_judge
+    )
+    formatted_turns = formatter(
         records, expected_turns, only_turns, turn_taking_data,
         get_relevant_dimensions_fn, kb_text=kb_text,
         prompt_visible_kb_text=prompt_visible_kb_text,
