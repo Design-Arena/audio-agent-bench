@@ -64,6 +64,11 @@ Turn-taking scoring is off by default for this skill.
 - Do not include turn-taking metrics in the main analysis unless the user explicitly asks for them and you have verified that the run artifacts support valid turn-taking evaluation.
 - For `--rehydrate` runs, treat turn-taking as unsupported unless the pipeline produces per-conversation audio artifacts that are known to align with the transcript being judged.
 
+## Execution Defaults
+
+- For rehydrated benchmark runs, default to `--parallel 16` unless the user explicitly asks for a different value or you have evidence that lower concurrency is needed for stability.
+- Keep `--skip-turn-taking` as the default for judging unless the user explicitly asks for turn-taking analysis and the artifacts support it.
+
 ## Preferred Entrypoint
 
 Use the helper script when judged artifacts are present and sane:

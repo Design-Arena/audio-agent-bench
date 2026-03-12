@@ -23,8 +23,8 @@ from .llm_judge import (
 )
 
 
-OPENAI_JUDGE_VERSION = "openai-v4-tool-results-in-prompt"
-OPENAI_REHYDRATED_JUDGE_VERSION = "openai-v4-rehydrated-tool-results-in-prompt"
+OPENAI_JUDGE_VERSION = "openai-v6-kb-lenient-present-tense"
+OPENAI_REHYDRATED_JUDGE_VERSION = "openai-v6-rehydrated-kb-lenient-present-tense"
 OPENAI_JUDGE_MODEL = "gpt-5.2"
 
 

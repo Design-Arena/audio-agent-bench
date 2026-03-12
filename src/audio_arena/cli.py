@@ -124,6 +124,24 @@ def list_available_benchmarks() -> list[str]:
     return sorted(benchmarks)
 
 
+def load_benchmark_kb_text(name: str) -> Optional[str]:
+    """Load benchmark knowledge base text when the benchmark provides one."""
+    try:
+        module = importlib.import_module(f"benchmarks.{name}.config")
+    except ModuleNotFoundError:
+        return None
+
+    module_path = getattr(module, "__file__", None)
+    if not module_path:
+        return None
+
+    kb_path = Path(module_path).resolve().parent / "data" / "knowledge_base.txt"
+    if not kb_path.exists():
+        return None
+
+    return kb_path.read_text(encoding="utf-8")
+
+
 def get_pipeline_class(pipeline_type: str) -> type:
     """Load pipeline class by type name."""
     class_name = PIPELINE_CLASSES.get(pipeline_type)
@@ -724,12 +742,14 @@ def judge(
 
     # Load benchmark for expected turns and get_relevant_dimensions
     get_relevant_dimensions_fn = None
+    kb_text = None
     try:
         BenchmarkConfig = load_benchmark(benchmark_name)
         benchmark = BenchmarkConfig()
         expected_turns = benchmark.turns
         benchmark_turns_module = importlib.import_module(f"benchmarks.{benchmark_name}.turns")
         get_relevant_dimensions_fn = getattr(benchmark_turns_module, 'get_relevant_dimensions', None)
+        kb_text = load_benchmark_kb_text(benchmark_name)
     except Exception:
         click.echo(f"Could not load benchmark '{benchmark_name}', using shared turns module")
         from benchmarks.conversation_bench.turns import turns as expected_turns
@@ -755,6 +775,7 @@ def judge(
                     skip_turn_taking=skip_turn_taking,
                     get_relevant_dimensions_fn=get_relevant_dimensions_fn,
                     model=judge_model,
+                    kb_text=kb_text,
                 )
             )
         except Exception as e:
@@ -789,6 +810,7 @@ def judge(
                     expected_turns=expected_turns,
                     skip_turn_taking=skip_turn_taking,
                     get_relevant_dimensions_fn=get_relevant_dimensions_fn,
+                    kb_text=kb_text,
                 )
             )
         except Exception as e:

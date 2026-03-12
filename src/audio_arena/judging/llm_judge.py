@@ -25,6 +25,7 @@ import sys
 import json
 import argparse
 import asyncio
+import importlib
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from datetime import datetime
@@ -42,8 +43,8 @@ except ImportError:
 # Configuration
 # ============================================================================
 
-JUDGE_VERSION = "claude-agent-sdk-v12-tool-results-in-prompt"
-REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v12-rehydrated-tool-results-in-prompt"
+JUDGE_VERSION = "claude-agent-sdk-v14-kb-lenient-present-tense"
+REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v14-rehydrated-kb-lenient-present-tense"
 JUDGE_MODEL = "claude-opus-4-5"
 
 # System prompt for the two-phase judge
@@ -112,11 +113,13 @@ For each turn, evaluate SIX dimensions:
 
 4. **kb_grounding** (bool):
    - The Knowledge Base (provided at the top of the input) is the source of truth for factual grounding, NOT the golden text alone
-   - TRUE if the assistant's response is factually consistent with the Knowledge Base
+   - TRUE if the assistant's response is factually consistent with the Knowledge Base, prior conversation state, and successful tool results shown in the input
    - TRUE if the assistant provides additional correct details from the Knowledge Base that go beyond the golden text — do NOT penalize this
+   - TRUE if the assistant adds a reasonable conversational detail or present-tense commentary that is not explicitly spelled out in the Knowledge Base, as long as it does not contradict the provided evidence and does not materially change the answer
+   - TRUE when the assistant correctly states the core KB policy and then adds light present-tense operational commentary such as "we should be good" or "it should still work today," unless the input provides contrary time/status evidence
    - TRUE if the turn depends on an action that never executed due to a cascade failure and the assistant does not fabricate information about that action
    - FALSE only for clear factual contradictions with the Knowledge Base (wrong dates, times, locations, speakers, prices, names)
-   - FALSE if the assistant states facts that are neither in the Knowledge Base nor in the golden text (hallucination)
+   - FALSE for unsupported extra details only when they materially change the user-facing facts or conflict with the Knowledge Base, transcript, or tool results
 
 5. **ambiguity_handling** (bool):
    - ONLY scored for turns where "Score Dimensions" includes "ambiguity_handling"
@@ -216,6 +219,8 @@ Apply both principles consistently across all runs of the same turn.
 The golden_text is the *ideal* response for evaluation purposes. Apply these principles consistently:
 - **Core vs. embellishment**: Identify the core test of each turn (e.g., correcting a false presupposition, providing the right price, making the right tool call). Pass instruction_following and kb_grounding when the core test passes, even if the assistant omits supplementary details that the golden includes.
 - **Extra correct details**: Do NOT fail an assistant for adding correct details from the KB that go beyond the golden text (e.g., mentioning a clinic address, parking info, or a related event). Only fail kb_grounding if the extra detail is factually wrong.
+- **Non-material extra commentary**: Do NOT fail kb_grounding just because an extra phrase is not literally stated in the KB or golden text, if it is a reasonable non-contradictory add-on and does not change the substantive answer.
+- **Present-tense delivery commentary example**: If the assistant correctly states a same-day delivery cutoff from the KB and then adds a light phrase like "we should be good for same-day delivery," treat that as acceptable unless the input includes contrary time evidence.
 - **Missing optional details**: When the golden text includes supplementary facts beyond what the user directly asked (e.g., room number when user asked about time, or a related event on a different day), do NOT require the assistant to include those unless they are essential to answering the user's actual question.
 - **Consistency**: Apply the same tolerance for extra/missing details across all runs of the same turn. If a supplementary detail is optional in one run, it must be optional in all runs.
 
@@ -427,6 +432,24 @@ def build_judge_summary(turn_count: int, cross_turn_realignment: bool) -> str:
     if cross_turn_realignment:
         return f"Evaluated {turn_count} turns with cross-turn realignment."
     return f"Evaluated {turn_count} turns without cross-turn realignment."
+
+
+def load_benchmark_kb_text(benchmark_name: str) -> Optional[str]:
+    """Load benchmark knowledge base text when the benchmark provides one."""
+    try:
+        module = importlib.import_module(f"benchmarks.{benchmark_name}.config")
+    except ModuleNotFoundError:
+        return None
+
+    module_path = getattr(module, "__file__", None)
+    if not module_path:
+        return None
+
+    kb_path = Path(module_path).resolve().parent / "data" / "knowledge_base.txt"
+    if not kb_path.exists():
+        return None
+
+    return kb_path.read_text(encoding="utf-8")
 
 
 # ============================================================================
@@ -1104,18 +1127,28 @@ def main():
 
     # Load expected turns and get_relevant_dimensions for the correct benchmark
     get_relevant_dimensions_fn = None
+    kb_text = None
     try:
         benchmark_name = run_dir.parent.name
         from audio_arena.cli import load_benchmark
         benchmark_module = importlib.import_module(f"benchmarks.{benchmark_name}.turns")
         expected_turns = load_benchmark(benchmark_name).turns
         get_relevant_dimensions_fn = getattr(benchmark_module, 'get_relevant_dimensions', None)
+        kb_text = load_benchmark_kb_text(benchmark_name)
     except Exception:
         from benchmarks.conversation_bench.turns import turns as expected_turns
 
     # Run judgment
     try:
-        result = asyncio.run(judge_with_claude(run_dir, only_turns, args.debug, get_relevant_dimensions_fn=get_relevant_dimensions_fn))
+        result = asyncio.run(
+            judge_with_claude(
+                run_dir,
+                only_turns,
+                args.debug,
+                get_relevant_dimensions_fn=get_relevant_dimensions_fn,
+                kb_text=kb_text,
+            )
+        )
     except Exception as e:
         print(f"ERROR: Judgment failed: {e}", file=sys.stderr)
         if args.debug:

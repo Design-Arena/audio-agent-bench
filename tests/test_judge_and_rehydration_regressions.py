@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.services.openai.realtime import events as rt_events
 
-from audio_arena.judging.llm_judge import format_turns_for_judge
+from audio_arena.judging.llm_judge import build_judge_system_prompt, format_turns_for_judge
 from audio_arena.pipelines.openai_realtime import OpenAIRealtimeLLMServiceExplicitToolResult
 from audio_arena.pipelines.realtime import RealtimePipeline
 from audio_arena.pipelines.text import TextPipeline
@@ -133,6 +133,23 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
 
         self.assertIn("**Tool Use Guidance**:", formatted)
         self.assertIn("reuse the already-established item facts", formatted)
+
+    def test_judge_prompt_allows_non_material_extra_grounded_commentary(self):
+        prompt = build_judge_system_prompt(cross_turn_realignment=False)
+
+        self.assertIn(
+            "reasonable conversational detail or present-tense commentary",
+            prompt,
+        )
+        self.assertIn(
+            "Do NOT fail kb_grounding just because an extra phrase is not literally stated",
+            prompt,
+        )
+        self.assertIn(
+            "same-day delivery cutoff from the KB",
+            prompt,
+        )
+        self.assertIn("we should be good for same-day delivery", prompt)
 
     def test_text_pipeline_rehydration_keeps_tool_history_in_system_prompt(self):
         pipeline = TextPipeline(DummyBenchmark())
