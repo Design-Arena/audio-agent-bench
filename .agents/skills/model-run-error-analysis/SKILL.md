@@ -67,6 +67,7 @@ Turn-taking scoring is off by default for this skill.
 ## Execution Defaults
 
 - For rehydrated benchmark runs, default to `--parallel 16` unless the user explicitly asks for a different value or you have evidence that lower concurrency is needed for stability.
+- When executing OpenAI Realtime benchmark runs as part of this skill, always pass `--service openai-realtime` on the `audio-arena run` command. Do not use `--service openai`, and do not rely on alias auto-detection when `--disable-vad` matters.
 - Keep `--skip-turn-taking` as the default for judging unless the user explicitly asks for turn-taking analysis and the artifacts support it.
 
 ## Preferred Entrypoint

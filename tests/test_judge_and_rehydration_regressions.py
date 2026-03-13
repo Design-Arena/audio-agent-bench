@@ -272,6 +272,10 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
         )
         self.assertIn("we should be good for same-day delivery", prompt)
         self.assertIn(
+            "arriving 15 minutes early for first-time-patient paperwork",
+            prompt,
+        )
+        self.assertIn(
             "Do NOT fail kb_grounding just because the assistant lacks a hidden catalog detail",
             prompt,
         )

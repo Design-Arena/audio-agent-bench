@@ -92,7 +92,8 @@ turns = [
 
 # Turn 5 — Straightforward item lookup: organic eggs
 {'input': "And some organic eggs.",
- 'golden_text': "Organic Eggs, one dozen for six forty-nine. Adding.",
+ 'golden_text': "Organic Eggs are six forty-nine per dozen. How many "
+                "dozens would you like?",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'organic eggs'}},
  'tool_use_guidance': "First discovery of organic eggs in this session. "
@@ -475,7 +476,7 @@ turns = [
 
 # Turn 23 — Compound edit: remove candy + swap balsamic for Dijon mustard
 {'input': "Take off the maple candy. And swap the balsamic vinegar "
-          "for Dijon mustard.",
+          "for Dijon.",
  'golden_text': "Removed the Maple Candy. And I've swapped out the "
                 "Balsamic Vinegar for Dijon Mustard, eight-ounce jar "
                 "for four forty-nine. Your subtotal is now one hundred "
