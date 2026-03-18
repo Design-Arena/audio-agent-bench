@@ -474,41 +474,43 @@ turns = [
 # TURNS 23-29: POST-ORDER MODIFICATIONS + FINAL RECONCILIATION
 # ============================================================================
 
-# Turn 23 — Compound edit: remove candy + swap balsamic for Dijon mustard
-{'input': "Take off the maple candy. And swap the balsamic vinegar "
-          "for Dijon.",
- 'golden_text': "Removed the Maple Candy. And I've swapped out the "
-                "Balsamic Vinegar for Dijon Mustard, eight-ounce jar "
-                "for four forty-nine. Your subtotal is now one hundred "
+# Turn 23 — Compound edit: remove candy + conditional swap balsamic for Dijon
+{'input': "Take off the maple candy. And if Dijon mustard is under four "
+          "fifty, swap the balsamic vinegar for that.",
+ 'golden_text': "Removed the Maple Candy. Dijon Mustard is four forty-nine, "
+                "so I've swapped out the Balsamic Vinegar for Dijon "
+                "Mustard, eight-ounce jar. Your subtotal is now one hundred "
                 "sixty-nine sixty-nine.",
  'required_function_call': [
      {'name': 'update_order',
       'args': {'order_id': 'ORD-5521',
                'action': 'remove',
                'item_name': 'Maple Candy'}},
+     {'name': 'lookup_item',
+      'args': {'query': 'dijon mustard'}},
      {'name': 'update_order',
       'args': {'order_id': 'ORD-5521',
                'action': 'remove',
                'item_name': 'Balsamic Vinegar'}},
-     {'name': 'lookup_item',
-      'args': {'query': 'dijon mustard'}},
      {'name': 'update_order',
       'args': {'order_id': 'ORD-5521',
                'action': 'add',
                'item_name': 'Dijon Mustard',
                'quantity': 1}}],
- 'tool_use_guidance': "Maple Candy and Balsamic Vinegar are already known "
-                      "order items, so no lookup is needed for their removal. "
-                      "Dijon Mustard is a new item on this turn, so require "
-                      "lookup_item before adding it.",
+ 'tool_use_guidance': "Maple Candy is already a known order item, so no "
+                      "lookup is needed for its removal. Dijon Mustard is a "
+                      "new item and the swap depends on whether it is under "
+                      "four dollars and fifty cents, so require "
+                      "lookup_item before deciding whether to remove "
+                      "Balsamic Vinegar and add Dijon Mustard.",
  'function_call_response': [
-     {'status': 'success'},
      {'status': 'success'},
      {'status': 'success',
       'results': [{'item_id': '4025',
                    'name': 'Dijon Mustard',
                    'size': '8 oz jar',
                    'price': 4.49}]},
+     {'status': 'success'},
      {'status': 'success'}],
  'categories': ['tool_use', 'long_range_memory', 'numerical_reasoning'],
  'audio_file': 'audio/turn_023.wav'},

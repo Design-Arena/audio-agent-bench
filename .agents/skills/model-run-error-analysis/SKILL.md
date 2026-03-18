@@ -70,6 +70,110 @@ Turn-taking scoring is off by default for this skill.
 - When executing OpenAI Realtime benchmark runs as part of this skill, always pass `--service openai-realtime` on the `audio-arena run` command. Do not use `--service openai`, and do not rely on alias auto-detection when `--disable-vad` matters.
 - Keep `--skip-turn-taking` as the default for judging unless the user explicitly asks for turn-taking analysis and the artifacts support it.
 
+## Multiagent Eval Mode
+
+When the user explicitly asks for a multiagent eval, subagent eval, or to run all benchmarks with subagents, use a parallel benchmark-worker workflow instead of a single-process review flow.
+
+### Trigger phrases
+
+Treat requests like these as a strong trigger for this mode:
+- `run all benchmarks with subagents`
+- `multiagent eval`
+- `delegate benchmark runs`
+- `use GPT-5.4 high reasoning subagents`
+
+### Default multiagent settings
+
+Unless the user says otherwise, use these defaults:
+- model under test: `gpt-realtime-1.5`
+- run mode: `--rehydrate`
+- service: `--service openai-realtime`
+- VAD: `--disable-vad`
+- judge mode: `--judge openai --skip-turn-taking`
+- benchmark run parallelism: `--parallel 32`
+- subagent model: `GPT-5.4`
+- subagent reasoning effort: `high`
+
+### Multiagent workflow
+
+1. Enumerate the benchmark set to run.
+   - By default, use the main benchmark suite in this repo:
+     - `appointment_bench`
+     - `assistant_bench`
+     - `conversation_bench`
+     - `event_bench`
+     - `grocery_bench`
+     - `product_bench`
+2. Spawn one or more GPT-5.4 high-reasoning subagents and explicitly tell them to use this `model-run-error-analysis` skill for their assigned benchmark.
+3. Have each subagent run its benchmark with:
+
+```bash
+uv run audio-arena run <benchmark> \
+  --model gpt-realtime-1.5 \
+  --service openai-realtime \
+  --rehydrate \
+  --parallel 32 \
+  --disable-vad
+```
+
+4. Have each subagent judge its run with:
+
+```bash
+uv run audio-arena judge <run_dir> \
+  --judge openai \
+  --skip-turn-taking
+```
+
+5. Have each subagent perform the benchmark-local deep review:
+   - artifact sanity check
+   - judged-row or transcript-first packet build
+   - dominant error mode bucketing
+   - representative full datapoints
+6. Aggregate all benchmark outputs into one batch folder under `results/`, preferably under a timestamped `results/subagents/` directory.
+7. Do not stop at run completion. The task is not done until the cross-benchmark summary table and detailed error review are complete.
+
+### Multiagent deliverables
+
+When using this mode, the final answer must include both a cross-benchmark summary and a benchmark-by-benchmark deep review.
+
+Required cross-benchmark summary:
+- a clean table with one row per benchmark
+- benchmark name
+- pass count
+- fail count
+- pass rate
+- latency summaries when available
+- run path
+
+Required per-benchmark analysis:
+- dominant error modes in plain language
+- a few representative full datapoints for each major error mode
+- for each datapoint, include:
+  - turn number
+  - user input
+  - assistant output
+  - tool calls
+  - tool results
+  - judged dimensions and judge reasoning when available
+  - golden answer
+  - required function call
+- explicit notes on whether the issue is:
+  - real model behavior
+  - grader strictness
+  - benchmark contract or ground-truth issue
+  - runtime artifact
+
+### Multiagent reporting style
+
+The user prefers a review format that is easy to inspect directly in the conversation.
+
+When presenting the final answer for a multiagent eval:
+- start with a nice cross-benchmark results table
+- follow with benchmark-by-benchmark error-mode sections
+- include full datapoints inline in readable rich text, not only as a separate markdown artifact
+- keep turn-taking out of the table and writeup unless the user explicitly asked for it
+- save markdown/CSV artifacts under `results/`, but do not make the saved files the only deliverable
+
 ## Preferred Entrypoint
 
 Use the helper script when judged artifacts are present and sane:
