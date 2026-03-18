@@ -67,6 +67,8 @@ PIPELINE_CLASSES = {
     "nova-sonic": "audio_arena.pipelines.nova_sonic.NovaSonicPipeline",
 }
 
+REHYDRATED_TURN_RUNS_DIRNAME = "turn_runs"
+
 
 # ============================================================================
 # Utility Functions
@@ -260,6 +262,147 @@ def setup_logging(run_dir: Path, verbose: bool = False):
         level="DEBUG",
         format="{time:YYYY-MM-DD HH:mm:ss.SSS} {level} {name}: {message}",
     )
+
+
+def add_turn_logging_sink(turn_run_dir: Path) -> int:
+    """Add a per-turn file sink scoped to a rehydrated worker task."""
+    turn_dir_str = str(turn_run_dir)
+    return logger.add(
+        turn_run_dir / "run.log",
+        level="DEBUG",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} {level} {name}: {message}",
+        filter=lambda record: record["extra"].get("rehydration_turn_dir") == turn_dir_str,
+    )
+
+
+def build_rehydrated_turn_run_dir(run_dir: Path, turn_index: int, width: int) -> Path:
+    """Return the isolated artifact directory for a rehydrated target turn."""
+    return run_dir / REHYDRATED_TURN_RUNS_DIRNAME / f"turn_{turn_index:0{width}d}"
+
+
+def read_jsonl_records(path: Path) -> list[dict]:
+    """Read a JSONL file into a list of dicts."""
+    records = []
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+def finalize_rehydrated_run_artifacts(
+    *,
+    run_dir: Path,
+    model: str,
+    target_indices: list[int],
+    turn_results: dict[int, dict],
+    parallel: int,
+    disable_vad: bool,
+    real_audio_speaker: Optional[str],
+) -> dict:
+    """Merge canonical parent artifacts from isolated per-turn rehydrated outputs."""
+    merged_records: list[dict] = []
+    seen_turns: dict[int, Path] = {}
+    failed_turns: list[int] = []
+    manifest_entries: list[dict] = []
+
+    for turn_index in sorted(target_indices):
+        result = turn_results.get(turn_index)
+        if result is None:
+            raise RuntimeError(f"Missing execution result metadata for rehydrated turn {turn_index}.")
+
+        turn_run_dir = Path(result["turn_run_dir"])
+        transcript_path = turn_run_dir / "transcript.jsonl"
+        runtime_path = turn_run_dir / "runtime.json"
+        conversation_wav_path = turn_run_dir / "conversation.wav"
+        success = bool(result.get("success"))
+
+        manifest_entry = {
+            "turn": turn_index,
+            "turn_run_dir": str(turn_run_dir),
+            "success": success,
+            "error": result.get("error"),
+            "transcript_path": str(transcript_path),
+            "transcript_exists": transcript_path.exists(),
+            "runtime_path": str(runtime_path),
+            "runtime_exists": runtime_path.exists(),
+            "conversation_wav_path": str(conversation_wav_path),
+            "conversation_wav_exists": conversation_wav_path.exists(),
+        }
+
+        if success:
+            if not transcript_path.exists():
+                raise RuntimeError(
+                    f"Successful rehydrated turn {turn_index} is missing transcript.jsonl in {turn_run_dir}."
+                )
+            records = read_jsonl_records(transcript_path)
+            if len(records) != 1:
+                raise RuntimeError(
+                    f"Successful rehydrated turn {turn_index} must have exactly one transcript row; "
+                    f"found {len(records)} in {transcript_path}."
+                )
+            record = records[0]
+            actual_turn = record.get("turn")
+            if actual_turn in seen_turns:
+                raise RuntimeError(
+                    f"Duplicate transcript rows found for rehydrated turn {actual_turn}: "
+                    f"{seen_turns[actual_turn]} and {transcript_path}."
+                )
+            if actual_turn != turn_index:
+                raise RuntimeError(
+                    f"Rehydrated turn {turn_index} wrote transcript row for turn {actual_turn} "
+                    f"in {transcript_path}."
+                )
+            seen_turns[actual_turn] = transcript_path
+            merged_records.append(record)
+        else:
+            failed_turns.append(turn_index)
+
+        manifest_entries.append(manifest_entry)
+
+    merged_records.sort(key=lambda record: record["turn"])
+    transcript_path = run_dir / "transcript.jsonl"
+    transcript_path.write_text(
+        "".join(json.dumps(record, ensure_ascii=False) + "\n" for record in merged_records),
+        encoding="utf-8",
+    )
+
+    turn_taking_skip_reason = (
+        "Per-turn rehydrated runs keep audio isolated in turn_runs/; parent conversation.wav is intentionally omitted."
+    )
+    runtime = {
+        "model_name": model,
+        "turns": len(merged_records),
+        "total_attempted": len(target_indices),
+        "failed_turns": failed_turns,
+        "mode": "rehydrated",
+        "parallel": parallel,
+        "disable_vad": disable_vad,
+        "audio_source": f"real_audio/{real_audio_speaker}" if real_audio_speaker else "tts",
+        "turn_artifact_layout": "per_turn_subdirs",
+        "turn_taking_supported": False,
+        "turn_taking_skip_reason": turn_taking_skip_reason,
+        "note": "Single-step rehydration: each turn evaluated independently with golden prior context",
+    }
+    (run_dir / "runtime.json").write_text(
+        json.dumps(runtime, indent=2), encoding="utf-8"
+    )
+
+    manifest = {
+        "model_name": model,
+        "mode": "rehydrated",
+        "parallel": parallel,
+        "target_turns": sorted(target_indices),
+        "turn_artifact_layout": "per_turn_subdirs",
+        "turn_taking_supported": False,
+        "turn_taking_skip_reason": turn_taking_skip_reason,
+        "turns": manifest_entries,
+    }
+    (run_dir / "rehydrated_manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8"
+    )
+    return runtime
 
 
 # ============================================================================
@@ -633,7 +776,8 @@ async def _run_rehydrated(
         target_indices = [int(i.strip()) for i in only_turns.split(",")]
         click.echo(f"Evaluating turns: {target_indices}")
 
-    results: dict[int, bool] = {}
+    results: dict[int, dict] = {}
+    turn_dir_width = max(3, len(str(len(all_turns) - 1)))
 
     async def _run_single_turn(
         semaphore: asyncio.Semaphore,
@@ -641,54 +785,72 @@ async def _run_rehydrated(
     ):
         async with semaphore:
             golden_history = all_turns[:target_idx] if target_idx > 0 else None
+            turn_run_dir = build_rehydrated_turn_run_dir(run_dir, target_idx, turn_dir_width)
+            turn_run_dir.mkdir(parents=True, exist_ok=True)
             click.echo(
                 f"[Rehydration] Turn {target_idx}/{len(all_turns) - 1}"
                 + (f" (rehydrating {len(golden_history)} golden turns)" if golden_history else "")
+                + f" -> {turn_run_dir.relative_to(run_dir)}"
             )
 
-            recorder = TranscriptRecorder(run_dir, model)
-            pipeline_instance = pipeline_cls(benchmark)
+            turn_sink_id = add_turn_logging_sink(turn_run_dir)
+            turn_benchmark = BenchmarkConfig()
+            if real_audio_speaker:
+                _setup_real_audio(turn_benchmark, real_audio_speaker)
+            recorder = TranscriptRecorder(turn_run_dir, model)
+            pipeline_instance = pipeline_cls(turn_benchmark)
 
             try:
-                await pipeline_instance.run(
-                    recorder=recorder,
-                    model=model,
-                    service_class=service_class,
-                    service_name=service,
-                    turn_indices=[target_idx],
-                    rehydration_turns=golden_history,
-                    disable_vad=disable_vad,
-                )
-                results[target_idx] = True
+                with logger.contextualize(
+                    rehydration_turn_dir=str(turn_run_dir),
+                    rehydration_target_turn=target_idx,
+                ):
+                    await pipeline_instance.run(
+                        recorder=recorder,
+                        model=model,
+                        service_class=service_class,
+                        service_name=service,
+                        turn_indices=[target_idx],
+                        rehydration_turns=golden_history,
+                        disable_vad=disable_vad,
+                    )
+                results[target_idx] = {
+                    "success": True,
+                    "turn_run_dir": str(turn_run_dir),
+                    "error": None,
+                }
                 click.echo(f"[Rehydration] Turn {target_idx} OK")
             except Exception as e:
-                logger.exception(f"Turn {target_idx} failed: {e}")
+                with logger.contextualize(
+                    rehydration_turn_dir=str(turn_run_dir),
+                    rehydration_target_turn=target_idx,
+                ):
+                    logger.exception(f"Turn {target_idx} failed: {e}")
                 click.echo(f"  Turn {target_idx} FAILED: {e}")
-                results[target_idx] = False
+                results[target_idx] = {
+                    "success": False,
+                    "turn_run_dir": str(turn_run_dir),
+                    "error": str(e),
+                }
             finally:
                 recorder.close()
+                logger.remove(turn_sink_id)
 
     semaphore = asyncio.Semaphore(max_parallel)
     tasks = [_run_single_turn(semaphore, idx) for idx in target_indices]
     await asyncio.gather(*tasks)
 
-    succeeded = sum(1 for v in results.values() if v)
-    failed_turns = sorted(idx for idx, ok in results.items() if not ok)
-
-    runtime = {
-        "model_name": model,
-        "turns": succeeded,
-        "total_attempted": len(target_indices),
-        "failed_turns": failed_turns,
-        "mode": "rehydrated",
-        "parallel": max_parallel,
-        "disable_vad": disable_vad,
-        "audio_source": f"real_audio/{real_audio_speaker}" if real_audio_speaker else "tts",
-        "note": "Single-step rehydration: each turn evaluated independently with golden prior context",
-    }
-    (run_dir / "runtime.json").write_text(
-        json.dumps(runtime, indent=2), encoding="utf-8"
+    runtime = finalize_rehydrated_run_artifacts(
+        run_dir=run_dir,
+        model=model,
+        target_indices=target_indices,
+        turn_results=results,
+        parallel=max_parallel,
+        disable_vad=disable_vad,
+        real_audio_speaker=real_audio_speaker,
     )
+    succeeded = runtime["turns"]
+    failed_turns = runtime["failed_turns"]
 
     click.echo(f"\nCompleted rehydrated run: {succeeded}/{len(target_indices)} turns succeeded")
     if failed_turns:
@@ -808,6 +970,8 @@ def judge(
             judge_version=result.get("judge_version"),
             judge_model=result.get("judge_model", effective_model),
             realignment_applied=result.get("cross_turn_realignment_applied"),
+            turn_taking_supported=result.get("turn_taking_supported"),
+            turn_taking_skip_reason=result.get("turn_taking_skip_reason"),
         )
         summary_file = "openai_summary.json"
 
@@ -843,6 +1007,8 @@ def judge(
             judge_name="claude",
             judge_version=result.get("judge_version"),
             realignment_applied=result.get("cross_turn_realignment_applied"),
+            turn_taking_supported=result.get("turn_taking_supported"),
+            turn_taking_skip_reason=result.get("turn_taking_skip_reason"),
         )
         summary_file = "claude_summary.json"
 
@@ -852,8 +1018,14 @@ def judge(
     passes = summary.get("passes", summary.get("claude_passes", {}))
     total = summary.get("turns_scored", 0)
 
-    click.echo(f"\nJudged {total} turns (with turn-taking analysis)")
-    click.echo(f"  Turn-taking: {passes.get('turn_taking', total)}/{total}")
+    turn_taking_supported = summary.get("turn_taking_supported", True)
+    turn_taking_skip_reason = summary.get("turn_taking_skip_reason")
+    if turn_taking_supported:
+        click.echo(f"\nJudged {total} turns (with turn-taking analysis)")
+        click.echo(f"  Turn-taking: {passes.get('turn_taking', total)}/{total}")
+    else:
+        suffix = f": {turn_taking_skip_reason}" if turn_taking_skip_reason else ""
+        click.echo(f"\nJudged {total} turns (without turn-taking analysis{suffix})")
     click.echo(f"  Tool use: {passes.get('tool_use_correct', 0)}/{total}")
     click.echo(f"  Instruction following: {passes.get('instruction_following', 0)}/{total}")
     click.echo(f"  KB grounding: {passes.get('kb_grounding', 0)}/{total}")

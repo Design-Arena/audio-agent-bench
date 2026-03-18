@@ -377,8 +377,11 @@ class BasePipeline(ABC):
         complete that work first, then call result_callback(result). Do not call
         result_callback from a background task or before the result is ready.
         """
-        # Create a key for duplicate detection (function_name + args)
-        call_key = (params.function_name, str(params.arguments or {}))
+        # Create a stable key for duplicate detection (function_name + args)
+        call_key = (
+            params.function_name,
+            self._normalize_tool_args(params.arguments or {}),
+        )
 
         # Check for duplicate tool call
         if call_key in self._seen_tool_calls:
@@ -438,6 +441,59 @@ class BasePipeline(ABC):
         except TypeError:
             return str(args or {})
 
+    @staticmethod
+    def _normalize_time_string(value: str) -> str:
+        """Normalize simple HH:MM strings so 9:15 and 09:15 compare equal."""
+        parts = value.split(":")
+        if len(parts) != 2 or not all(part.isdigit() for part in parts):
+            return value
+        hour, minute = parts
+        if len(minute) != 2:
+            return value
+        return f"{int(hour):02d}:{minute}"
+
+    @classmethod
+    def _canonicalize_tool_arg_value(
+        cls,
+        value: Any,
+        *,
+        key: Optional[str] = None,
+    ) -> Any:
+        """Canonicalize a tool argument value for conservative semantic matching."""
+        if isinstance(value, dict):
+            return {
+                sub_key: cls._canonicalize_tool_arg_value(sub_value, key=sub_key)
+                for sub_key, sub_value in sorted(value.items())
+            }
+
+        if isinstance(value, list):
+            normalized_items = [
+                cls._canonicalize_tool_arg_value(item, key=key)
+                for item in value
+            ]
+            if key == "product_ids" and all(
+                isinstance(item, (str, int, float, bool)) for item in normalized_items
+            ):
+                return sorted(normalized_items)
+            return normalized_items
+
+        if isinstance(value, str):
+            stripped = value.strip()
+            return cls._normalize_time_string(stripped)
+
+        return value
+
+    @classmethod
+    def _tool_args_match(
+        cls,
+        expected_args: Dict[str, Any],
+        actual_args: Dict[str, Any],
+    ) -> bool:
+        """Return True for conservative semantic matches the runtime should accept."""
+        expected = cls._canonicalize_tool_arg_value(expected_args or {})
+        actual = cls._canonicalize_tool_arg_value(actual_args or {})
+        return expected == actual
+
     def _get_turn_tool_response(
         self,
         function_name: str,
@@ -455,13 +511,62 @@ class BasePipeline(ABC):
 
         current_turn = self.effective_turns[self.turn_idx]
         custom_response = current_turn.get("function_call_response")
-        if custom_response is None:
-            return result
-        if not isinstance(custom_response, list):
-            return custom_response
-
         required_calls = current_turn.get("required_function_call")
+        if required_calls is None:
+            return self._build_tool_error(
+                function_name=function_name,
+                arguments=arguments,
+                error_code="UNEXPECTED_TOOL_CALL",
+                message="No tool call is expected on this turn.",
+                expected_function=None,
+                expected_args=None,
+            )
+
+        if isinstance(required_calls, dict):
+            expected_name = required_calls.get("name")
+            if function_name != expected_name:
+                return self._build_tool_error(
+                    function_name=function_name,
+                    arguments=arguments,
+                    error_code="UNEXPECTED_TOOL_CALL",
+                    message="The called tool does not match the scripted tool for this turn.",
+                    expected_function=expected_name,
+                    expected_args=required_calls.get("args"),
+                )
+            expected_args = required_calls.get("args", {})
+            if not self._tool_args_match(expected_args, arguments):
+                return self._build_tool_error(
+                    function_name=function_name,
+                    arguments=arguments,
+                    error_code="ARG_MISMATCH",
+                    message="The tool name matches, but the arguments do not match the scripted tool call for this turn.",
+                    expected_function=expected_name,
+                    expected_args=expected_args,
+                )
+            if custom_response is None and function_name == "end_session":
+                return result
+            if custom_response is None:
+                return self._build_tool_error(
+                    function_name=function_name,
+                    arguments=arguments,
+                    error_code="UNEXPECTED_TOOL_CALL",
+                    message="This tool call does not match the scripted tool behavior for the turn.",
+                    expected_function=expected_name,
+                    expected_args=expected_args,
+                )
+            return custom_response if not isinstance(custom_response, list) else custom_response[0]
+
         normalized_args = self._normalize_tool_args(arguments)
+
+        if not isinstance(custom_response, list):
+            return self._build_tool_error(
+                function_name=function_name,
+                arguments=arguments,
+                error_code="UNEXPECTED_TOOL_CALL",
+                message="The scripted tool responses for this turn are inconsistent.",
+                expected_function=None,
+                expected_args=None,
+            )
 
         if isinstance(required_calls, list) and len(required_calls) == len(custom_response):
             for idx, required_call in enumerate(required_calls):
@@ -469,29 +574,56 @@ class BasePipeline(ABC):
                     continue
                 if required_call.get("name") != function_name:
                     continue
-                required_args = self._normalize_tool_args(required_call.get("args", {}))
-                if required_args == normalized_args:
+                if self._tool_args_match(required_call.get("args", {}), arguments):
                     self._consumed_tool_response_indices.add(idx)
                     self._tool_response_idx = max(self._tool_response_idx, idx + 1)
                     return custom_response[idx]
 
-        while self._tool_response_idx < len(custom_response):
-            idx = self._tool_response_idx
-            self._tool_response_idx += 1
-            if idx in self._consumed_tool_response_indices:
-                continue
-            self._consumed_tool_response_indices.add(idx)
-            logger.warning(
-                "Falling back to positional scripted tool response for "
-                f"{function_name} args={arguments}"
+        matching_calls = [
+            required_call
+            for required_call in required_calls
+            if required_call.get("name") == function_name
+        ]
+        if matching_calls:
+            return self._build_tool_error(
+                function_name=function_name,
+                arguments=arguments,
+                error_code="ARG_MISMATCH",
+                message="The tool name matches, but the arguments do not match any scripted tool call for this turn.",
+                expected_function=function_name,
+                expected_args=[call.get("args", {}) for call in matching_calls],
             )
-            return custom_response[idx]
 
-        logger.warning(
-            f"Tool response index {self._tool_response_idx} exceeds "
-            f"available responses ({len(custom_response)}) - using default"
+        expected_names = [required_call.get("name") for required_call in required_calls]
+        return self._build_tool_error(
+            function_name=function_name,
+            arguments=arguments,
+            error_code="UNEXPECTED_TOOL_CALL",
+            message="The called tool does not match any scripted tool for this turn.",
+            expected_function=expected_names,
+            expected_args=[call.get("args", {}) for call in required_calls],
         )
-        return result
+
+    @staticmethod
+    def _build_tool_error(
+        *,
+        function_name: str,
+        arguments: Dict[str, Any],
+        error_code: str,
+        message: str,
+        expected_function: Any,
+        expected_args: Any,
+    ) -> Dict[str, Any]:
+        """Build a benchmark-side tool error that the grader can score explicitly."""
+        return {
+            "status": "error",
+            "error_code": error_code,
+            "message": message,
+            "called_function": function_name,
+            "called_args": arguments or {},
+            "expected_function": expected_function,
+            "expected_args": expected_args,
+        }
 
     # ---- Abstract methods (pipeline-specific) ----
 

@@ -1,4 +1,6 @@
 import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -7,11 +9,15 @@ from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.services.openai.realtime import events as rt_events
 
 from audio_arena.judging.llm_judge import (
+    build_rehydrated_turn_prompt_bundles,
     build_judge_system_prompt,
     build_judge_user_prompt,
     format_rehydrated_turns_for_judge,
     format_turns_for_judge,
+    get_turn_taking_support,
+    write_outputs,
 )
+from benchmarks.appointment_bench.turns import turns as appointment_turns
 from audio_arena.pipelines.openai_realtime import OpenAIRealtimeLLMServiceExplicitToolResult
 from audio_arena.pipelines.realtime import RealtimePipeline
 from audio_arena.pipelines.text import TextPipeline
@@ -82,6 +88,235 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
         self.assertEqual(first, {"status": "error", "error_code": "SCHEDULE_CONFLICT"})
         self.assertEqual(second, {"status": "success"})
         self.assertEqual(third, {"status": "error", "error_code": "SESSION_FULL"})
+
+    def test_wrong_tool_on_single_call_turn_returns_unexpected_tool_error(self):
+        benchmark = DummyBenchmark()
+        benchmark.turns = [
+            {
+                "input": "check availability",
+                "required_function_call": {
+                    "name": "search_venues",
+                    "args": {"date": "2025-03-15", "guest_count": 90},
+                },
+                "function_call_response": {
+                    "status": "success",
+                    "venues": [{"venue_id": "garden_pavilion"}],
+                },
+            }
+        ]
+        pipeline = TextPipeline(benchmark)
+
+        result = pipeline._get_turn_tool_response(
+            "cancel_booking",
+            {"booking_id": "BK-1"},
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "UNEXPECTED_TOOL_CALL")
+        self.assertEqual(result["called_function"], "cancel_booking")
+        self.assertEqual(result["expected_function"], "search_venues")
+
+    def test_unexpected_tool_on_no_tool_turn_returns_unexpected_tool_error(self):
+        benchmark = DummyBenchmark()
+        benchmark.turns = [
+            {
+                "input": "what time does it start?",
+                "required_function_call": None,
+            }
+        ]
+        pipeline = TextPipeline(benchmark)
+
+        result = pipeline._get_turn_tool_response(
+            "lookup_item",
+            {"query": "flowers"},
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "UNEXPECTED_TOOL_CALL")
+        self.assertEqual(result["called_function"], "lookup_item")
+        self.assertIsNone(result["expected_function"])
+
+    def test_wrong_args_on_single_call_turn_returns_arg_mismatch(self):
+        benchmark = DummyBenchmark()
+        benchmark.turns = [
+            {
+                "input": "check availability",
+                "required_function_call": {
+                    "name": "search_venues",
+                    "args": {"date": "2025-03-15", "guest_count": 90},
+                },
+                "function_call_response": {
+                    "status": "success",
+                    "venues": [{"venue_id": "garden_pavilion"}],
+                },
+            }
+        ]
+        pipeline = TextPipeline(benchmark)
+
+        result = pipeline._get_turn_tool_response(
+            "search_venues",
+            {"date": "2025-03-16", "guest_count": 90},
+        )
+
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error_code"], "ARG_MISMATCH")
+        self.assertEqual(result["called_function"], "search_venues")
+        self.assertEqual(result["expected_function"], "search_venues")
+
+    def test_end_session_without_scripted_response_uses_implicit_success(self):
+        benchmark = DummyBenchmark()
+        benchmark.turns = [
+            {
+                "input": "thanks bye",
+                "required_function_call": {
+                    "name": "end_session",
+                    "args": {},
+                },
+                "function_call_response": None,
+            }
+        ]
+        pipeline = TextPipeline(benchmark)
+
+        result = pipeline._get_turn_tool_response("end_session", {})
+
+        self.assertEqual(result, {"status": "success"})
+
+    def test_time_args_match_when_hour_zero_padding_differs(self):
+        benchmark = DummyBenchmark()
+        benchmark.turns = [
+            {
+                "input": "book nine-fifteen",
+                "required_function_call": {
+                    "name": "book_appointment",
+                    "args": {"appointment_id": "APT-001", "time": "09:15"},
+                },
+                "function_call_response": {"status": "success"},
+            }
+        ]
+        pipeline = TextPipeline(benchmark)
+
+        result = pipeline._get_turn_tool_response(
+            "book_appointment",
+            {"appointment_id": "APT-001", "time": "9:15"},
+        )
+
+        self.assertEqual(result, {"status": "success"})
+
+    def test_product_ids_match_regardless_of_order(self):
+        benchmark = DummyBenchmark()
+        benchmark.turns = [
+            {
+                "input": "compare these laptops",
+                "required_function_call": {
+                    "name": "compare_specs",
+                    "args": {"product_ids": ["X1490", "S15Pro"]},
+                },
+                "function_call_response": {"status": "success"},
+            }
+        ]
+        pipeline = TextPipeline(benchmark)
+
+        result = pipeline._get_turn_tool_response(
+            "compare_specs",
+            {"product_ids": ["S15Pro", "X1490"]},
+        )
+
+        self.assertEqual(result, {"status": "success"})
+
+    def test_normalized_tool_args_treat_reordered_dicts_as_identical(self):
+        args_a = {"session_id": "920101", "name": "Jennifer Smith"}
+        args_b = {"name": "Jennifer Smith", "session_id": "920101"}
+
+        self.assertEqual(
+            TextPipeline._normalize_tool_args(args_a),
+            TextPipeline._normalize_tool_args(args_b),
+        )
+
+    def test_write_outputs_counts_unexpected_tool_call_as_tool_failure(self):
+        records = [
+            {
+                "turn": 0,
+                "model_name": "test-model",
+                "user_text": "What time does it start?",
+                "assistant_text": "Let me check that for you.",
+                "tool_calls": [{"name": "lookup_item", "args": {"query": "flowers"}}],
+                "tool_results": [
+                    {
+                        "name": "lookup_item",
+                        "response": {
+                            "result": {
+                                "status": "error",
+                                "error_code": "UNEXPECTED_TOOL_CALL",
+                            }
+                        },
+                    }
+                ],
+            }
+        ]
+        judgments = {
+            0: {
+                "scores": {
+                    "turn_taking": True,
+                    "tool_use_correct": False,
+                    "instruction_following": True,
+                    "kb_grounding": True,
+                    "ambiguity_handling": None,
+                    "state_tracking": None,
+                },
+                "reasoning": "Unexpected tool call on a no-tool turn should fail tool use.",
+            }
+        }
+        expected_turns = [
+            {
+                "input": "What time does it start?",
+                "golden_text": "It starts at 9 AM.",
+                "required_function_call": None,
+            }
+        ]
+
+        with TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            write_outputs(
+                run_dir=run_dir,
+                records=records,
+                judgments=judgments,
+                summary="",
+                model_name="test-model",
+                expected_turns=expected_turns,
+                judge_name="openai",
+                judge_version="test-version",
+                judge_model="test-judge",
+            )
+            summary = json.loads((run_dir / "openai_summary.json").read_text())
+
+        self.assertEqual(summary["passes"]["tool_use_correct"], 0)
+
+    def test_judge_prompt_allows_benign_benchmark_tool_mismatches(self):
+        prompt = build_judge_system_prompt(cross_turn_realignment=False)
+
+        self.assertIn("FALSE if no function call was expected but the assistant still called a tool", prompt)
+        self.assertIn("benchmark-generated tool error", prompt)
+        self.assertIn("9:15", prompt)
+        self.assertIn("end_session({})", prompt)
+
+    def test_rehydrated_run_without_parent_wav_skips_turn_taking_with_reason(self):
+        with TemporaryDirectory() as tmpdir:
+            run_dir = Path(tmpdir)
+            (run_dir / "runtime.json").write_text(
+                json.dumps(
+                    {
+                        "mode": "rehydrated",
+                        "turn_artifact_layout": "per_turn_subdirs",
+                        "turn_taking_skip_reason": "parent conversation.wav intentionally omitted",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            supported, reason = get_turn_taking_support(run_dir, skip_turn_taking=False)
+
+        self.assertFalse(supported)
+        self.assertEqual(reason, "parent conversation.wav intentionally omitted")
 
     def test_format_turns_for_judge_includes_tool_results(self):
         records = [
@@ -244,6 +479,56 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
         self.assertIn("## Turn 1", formatted)
         self.assertIn("**Assistant**: You are registered for Kevin Zhang.", formatted)
 
+    def test_build_rehydrated_turn_prompt_bundles_isolates_actual_target_turns(self):
+        records = [
+            {
+                "turn": 0,
+                "user_text": "register me for Kevin Zhang",
+                "assistant_text": "What name should I use for that registration?",
+                "tool_calls": [],
+                "tool_results": [],
+            },
+            {
+                "turn": 1,
+                "user_text": "What am I registered for?",
+                "assistant_text": "You are registered for Kevin Zhang.",
+                "tool_calls": [],
+                "tool_results": [],
+            },
+        ]
+        expected_turns = [
+            {
+                "input": "register me for Kevin Zhang",
+                "golden_text": "I've registered you for Kevin Zhang.",
+                "required_function_call": {
+                    "name": "register_for_session",
+                    "args": {"name": "Jennifer Smith", "session_id": "916303"},
+                },
+                "function_call_response": {"status": "success"},
+                "categories": ["tool_use", "long_range_memory"],
+            },
+            {
+                "input": "What am I registered for?",
+                "golden_text": "You're registered for Kevin Zhang.",
+                "required_function_call": None,
+                "categories": ["long_range_memory"],
+            },
+        ]
+
+        bundles = build_rehydrated_turn_prompt_bundles(
+            records,
+            expected_turns,
+            get_relevant_dimensions_fn=lambda turn: ["instruction_following", "kb_grounding", "state_tracking"]
+            if "long_range_memory" in turn.get("categories", [])
+            else ["instruction_following", "kb_grounding", "tool_use_correct"],
+        )
+
+        self.assertEqual([bundle["turn"] for bundle in bundles], [0, 1])
+        self.assertIn("What name should I use for that registration?", bundles[0]["prompt"])
+        self.assertNotIn("You are registered for Kevin Zhang.", bundles[0]["prompt"])
+        self.assertIn("You are registered for Kevin Zhang.", bundles[1]["prompt"])
+        self.assertNotIn("What name should I use for that registration?", bundles[1]["prompt"])
+
     def test_rehydrated_judge_user_prompt_explicitly_uses_hydrated_history(self):
         prompt = build_judge_user_prompt(
             "## Turn 52\n**Hydrated Prior Context**: Golden Turns 0-51",
@@ -382,6 +667,16 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
 
         self.assertIn("[Tool result:", pipeline.llm._session_properties.instructions)
         self.assertIn("\"event_id\": \"EVT-3001\"", pipeline.llm._session_properties.instructions)
+
+    def test_appointment_multi_call_turns_have_response_lists(self):
+        for turn_index in (16, 21):
+            turn = appointment_turns[turn_index]
+            self.assertIsInstance(turn["required_function_call"], list)
+            self.assertIsInstance(turn["function_call_response"], list)
+            self.assertEqual(
+                len(turn["required_function_call"]),
+                len(turn["function_call_response"]),
+            )
 
     def test_manual_turn_handling_ignores_duplicate_stop_after_first_commit(self):
         service = OpenAIRealtimeLLMServiceExplicitToolResult.__new__(

@@ -216,7 +216,10 @@ turns = [
                             'args': {'appointment_id': 'APT-001',
                                      'field': 'time',
                                      'new_value': '10:30'}},
- 'function_call_response': {'status': 'success'},
+ 'function_call_response': [
+     {'status': 'success'},
+     {'status': 'success'},
+ ],
  'categories': ['tool_use', 'long_range_memory', 'implicit_correction'],
  'audio_file': 'audio/turn_013.wav'},
 
@@ -258,7 +261,10 @@ turns = [
                'field': 'phone',
                'new_value': '415-916-1640'}},
  ],
- 'function_call_response': {'status': 'success'},
+ 'function_call_response': [
+     {'status': 'success'},
+     {'status': 'success'},
+ ],
  'categories': ['tool_use', 'long_range_memory'],
  'audio_file': 'audio/turn_016.wav'},
 
@@ -325,7 +331,10 @@ turns = [
                'field': 'phone',
                'new_value': '415-960-1614'}},
  ],
- 'function_call_response': {'status': 'success'},
+ 'function_call_response': [
+     {'status': 'success'},
+     {'status': 'success'},
+ ],
  'categories': ['tool_use', 'long_range_memory'],
  'audio_file': 'audio/turn_021.wav'},
 

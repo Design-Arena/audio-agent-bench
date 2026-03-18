@@ -80,7 +80,8 @@ For each turn, evaluate SIX dimensions:
    - Turn-taking failures indicate audio timing issues (interruptions, overlaps, missing audio)
 
 2. **tool_use_correct** (bool or null):
-   - ONLY scored for turns where a function call is EXPECTED (required_function_call is not None)
+   - TRUE if no function call was expected AND the assistant did not call any tool
+   - FALSE if no function call was expected but the assistant still called a tool
    - TRUE if the assistant correctly called the expected function with semantically equivalent arguments
    - TRUE if a function call was expected but was already made in an earlier turn (realignment case)
    - TRUE if a late function call is made at this turn (the call eventually happened, credit this turn)
@@ -92,10 +93,13 @@ For each turn, evaluate SIX dimensions:
      - If Score Dimensions includes "state_tracking": set tool_use_correct=TRUE and state_tracking=FALSE. The penalty lands on state tracking, not tool use—the root cause is forgetting state, not a tool-use failure.
      - If Score Dimensions does NOT include "state_tracking": set tool_use_correct=FALSE. The penalty must land somewhere—fall back to tool use.
    - FALSE if a function call was expected, not made, and NOT already made earlier (and none of the above absorption rules apply)
+   - If the transcript shows a benchmark-generated tool error such as `UNEXPECTED_TOOL_CALL` or `ARG_MISMATCH`, inspect the actual call carefully before scoring:
+     - FALSE when the benchmark error reflects a materially wrong tool, wrong ID, missing required step, or materially wrong arguments
+     - TRUE when the benchmark error is only a benign harness mismatch such as semantically equivalent wording, harmless formatting like `9:15` vs `09:15`, order-insensitive list ordering, or an expected `end_session({})` on a turn whose scripted response payload was omitted
    - FALSE if the assistant's words imply waiting for confirmation but it acts without waiting (words-actions mismatch)
    - For argument matching, use semantic equivalence (not verbatim)
    - IDs must match exactly (session IDs, appointment IDs, cart IDs, order IDs, etc.)
-   - Set to NULL for turns where no function call is expected
+   - Set to NULL only when no function call was expected AND the assistant made no tool call
 
 3. **instruction_following** (bool):
    - TRUE if assistant directly answers the question OR advances the task (including by gathering info or asking relevant questions)
@@ -180,7 +184,7 @@ When a turn has **Score Dimensions** that include **ambiguity_handling** and the
 # Critical: Instruction Following vs Tool Use (No Overlap)
 
 instruction_following and tool_use_correct are independent:
-- Missing a required function call, calling the wrong function → tool_use_correct=FALSE only.
+- Missing a required function call, calling the wrong function, or calling a tool when none was expected → tool_use_correct=FALSE only.
 - **Over-clarification (asked when not needed)**: If ambiguity_handling is in Score Dimensions → tool_use_correct=TRUE, ambiguity_handling=FALSE. If ambiguity_handling is NOT in Score Dimensions → tool_use_correct=FALSE (fallback).
 - Asking for confirmation when the user had already given all needed info (and it's not over-clarification) → tool_use_correct=FALSE only; instruction_following often TRUE.
 - Score instruction_following based on whether the assistant otherwise engaged; often TRUE.
@@ -270,7 +274,7 @@ For these turns, pay special attention to:
 
 Each turn includes a **Score Dimensions** field that lists exactly which dimensions should be scored for that turn.
 - `instruction_following`, `kb_grounding` are ALWAYS scored for all turns
-- `tool_use_correct` is ONLY scored when a function call is expected (otherwise set to null)
+- `tool_use_correct` is NULL only when no function call was expected and the assistant made no tool call
 - `ambiguity_handling` is ONLY scored when listed in Score Dimensions (otherwise set to null)
 - `state_tracking` is ONLY scored when listed in Score Dimensions (otherwise set to null)
 
@@ -278,7 +282,7 @@ Each turn includes a **Score Dimensions** field that lists exactly which dimensi
 
 For EVERY turn, the **reasoning** field must be a complete commentary that explains your judgment. Do not use terse one-liners. Include:
 
-1. **Tool use**: If a function was expected, say so and whether it was called correctly (or null if no function expected). If null, briefly say "No function expected."
+1. **Tool use**: Say whether a function was expected, what tool was actually called, and whether that behavior was correct. If no tool was expected and none was called, you may say tool_use_correct is null / not applicable.
 2. **Instruction following & KB**: Brief note if pass; if fail, state what was wrong.
 3. **State tracking** (when in Score Dimensions): You MUST state explicitly:
    - What state the model should have been tracking (e.g. prior registrations, cancellations, choices made earlier).
@@ -315,7 +319,7 @@ Output a JSON object with this structure:
 ```
 
 Note: The `turn_taking` field should match what was provided in the input (pre-computed from audio timing analysis).
-Note: Set `tool_use_correct` to NULL for turns where no function call is expected.
+Note: Set `tool_use_correct` to NULL only when no function call is expected and the assistant made no tool call. If a tool was called unexpectedly, score `tool_use_correct` as FALSE so the failure appears in metrics.
 Note: Set `ambiguity_handling` and `state_tracking` to NULL for turns where they are not in the Score Dimensions list.
 
 Output ONLY this JSON object, no markdown code blocks, no explanations outside the JSON.
@@ -349,6 +353,19 @@ def load_transcript(run_dir: Path) -> List[Dict[str, Any]]:
             line = line.strip()
             if line:
                 records.append(json.loads(line))
+    runtime = load_runtime_metadata(run_dir)
+    if runtime.get("mode") == "rehydrated":
+        turn_counts: Dict[int, int] = {}
+        for record in records:
+            turn_num = record["turn"]
+            turn_counts[turn_num] = turn_counts.get(turn_num, 0) + 1
+        duplicate_turns = sorted(
+            turn_num for turn_num, count in turn_counts.items() if count > 1
+        )
+        if duplicate_turns:
+            raise ValueError(
+                f"Duplicate turn rows found in rehydrated transcript.jsonl: {duplicate_turns}"
+            )
     # Realtime pipelines can flush turns out of order; judge logic should always
     # see turns in numeric order rather than raw write order.
     return sorted(records, key=lambda record: record["turn"])
@@ -370,6 +387,26 @@ def uses_cross_turn_realignment(run_dir: Path) -> bool:
     """Rehydrated runs evaluate each turn independently, so cross-turn credit shifting is disabled."""
     runtime = load_runtime_metadata(run_dir)
     return runtime.get("mode") != "rehydrated"
+
+
+def get_turn_taking_support(run_dir: Path, skip_turn_taking: bool) -> tuple[bool, Optional[str]]:
+    """Return whether turn-taking analysis should run and, if not, why."""
+    if skip_turn_taking:
+        return False, "Turn-taking analysis skipped by --skip-turn-taking."
+
+    runtime = load_runtime_metadata(run_dir)
+    wav_path = run_dir / "conversation.wav"
+    if wav_path.exists():
+        return True, None
+
+    if runtime.get("mode") == "rehydrated" and runtime.get("turn_artifact_layout") == "per_turn_subdirs":
+        return (
+            False,
+            runtime.get("turn_taking_skip_reason")
+            or "Per-turn rehydrated audio artifacts are isolated in turn_runs/; parent conversation.wav is intentionally omitted.",
+        )
+
+    return False, "No parent conversation.wav found for turn-taking analysis."
 
 
 def build_judge_system_prompt(cross_turn_realignment: bool) -> str:
@@ -835,6 +872,50 @@ def format_rehydrated_turns_for_judge(
     return "\n".join(lines)
 
 
+def build_rehydrated_turn_prompt_bundles(
+    records: List[Dict[str, Any]],
+    expected_turns: List[Dict[str, Any]],
+    turn_taking_data: Optional[Dict[int, Dict[str, Any]]] = None,
+    get_relevant_dimensions_fn=None,
+    kb_text: Optional[str] = None,
+    prompt_visible_kb_text: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Build one judge prompt per target turn for rehydrated runs.
+
+    This keeps actual transcript evidence strictly turn-local while still
+    including the shared hydrated golden history for prior context.
+    """
+    bundles: List[Dict[str, Any]] = []
+    for record in records:
+        turn_num = record["turn"]
+        per_turn_taking = None
+        if turn_taking_data and turn_num in turn_taking_data:
+            per_turn_taking = {turn_num: turn_taking_data[turn_num]}
+
+        formatted_turn = format_rehydrated_turns_for_judge(
+            [record],
+            expected_turns,
+            only_turns={turn_num},
+            turn_taking_data=per_turn_taking,
+            get_relevant_dimensions_fn=get_relevant_dimensions_fn,
+            kb_text=kb_text,
+            prompt_visible_kb_text=prompt_visible_kb_text,
+        )
+        bundles.append(
+            {
+                "turn": turn_num,
+                "formatted_turns": formatted_turn,
+                "prompt": build_judge_user_prompt(
+                    formatted_turn,
+                    [turn_num],
+                    cross_turn_realignment=False,
+                ),
+            }
+        )
+
+    return bundles
+
+
 # ============================================================================
 # Claude Judge
 # ============================================================================
@@ -887,46 +968,34 @@ async def judge_with_claude(
         mode_label = "with cross-turn realignment" if cross_turn_realignment else "without cross-turn realignment"
         print(f"Judging {len(records)} turns {mode_label}...", file=sys.stderr)
 
-    # Run turn-taking analysis if WAV file exists
+    # Run turn-taking analysis when parent-level audio evidence is available.
     turn_taking_data: Optional[Dict[int, Dict[str, Any]]] = None
     turn_taking_analysis = None
-    if not skip_turn_taking:
-        wav_path = run_dir / "conversation.wav"
-        if wav_path.exists():
-            if debug:
-                print("Running turn-taking analysis...", file=sys.stderr)
-            try:
-                from .turn_taking import analyze_turn_taking
-                turn_taking_analysis = analyze_turn_taking(run_dir)
-                if turn_taking_analysis.error:
-                    if debug:
-                        print(f"Turn-taking analysis error: {turn_taking_analysis.error}", file=sys.stderr)
-                else:
-                    turn_taking_data = {
-                        idx: result.to_dict()
-                        for idx, result in turn_taking_analysis.per_turn.items()
-                    }
-                    if debug and turn_taking_analysis.failed_turns:
-                        print(f"Turn-taking failures: {turn_taking_analysis.failed_turns}", file=sys.stderr)
-            except Exception as e:
+    turn_taking_supported, turn_taking_skip_reason = get_turn_taking_support(
+        run_dir, skip_turn_taking
+    )
+    if turn_taking_supported:
+        if debug:
+            print("Running turn-taking analysis...", file=sys.stderr)
+        try:
+            from .turn_taking import analyze_turn_taking
+            turn_taking_analysis = analyze_turn_taking(run_dir)
+            if turn_taking_analysis.error:
                 if debug:
-                    print(f"Turn-taking analysis failed: {e}", file=sys.stderr)
+                    print(f"Turn-taking analysis error: {turn_taking_analysis.error}", file=sys.stderr)
+            else:
+                turn_taking_data = {
+                    idx: result.to_dict()
+                    for idx, result in turn_taking_analysis.per_turn.items()
+                }
+                if debug and turn_taking_analysis.failed_turns:
+                    print(f"Turn-taking failures: {turn_taking_analysis.failed_turns}", file=sys.stderr)
+        except Exception as e:
+            if debug:
+                print(f"Turn-taking analysis failed: {e}", file=sys.stderr)
+    elif debug and turn_taking_skip_reason:
+        print(f"Turn-taking analysis skipped: {turn_taking_skip_reason}", file=sys.stderr)
 
-    # Format turns (with turn-taking data and KB if available)
-    formatter = (
-        format_turns_for_judge if cross_turn_realignment else format_rehydrated_turns_for_judge
-    )
-    formatted_turns = formatter(
-        records, expected_turns, only_turns, turn_taking_data,
-        get_relevant_dimensions_fn, kb_text=kb_text,
-        prompt_visible_kb_text=prompt_visible_kb_text,
-    )
-
-    prompt = build_judge_user_prompt(
-        formatted_turns,
-        [record["turn"] for record in records],
-        cross_turn_realignment,
-    )
     system_prompt = build_judge_system_prompt(cross_turn_realignment)
     judge_version = JUDGE_VERSION if cross_turn_realignment else REHYDRATED_JUDGE_VERSION
 
@@ -937,45 +1006,76 @@ async def judge_with_claude(
         permission_mode="bypassPermissions",
     )
 
-    # Query Claude
-    all_text = []
-    async for message in query(prompt=prompt, options=options):
-        if hasattr(message, 'content'):
-            if isinstance(message.content, str):
-                all_text.append(message.content)
-            elif isinstance(message.content, list):
-                for block in message.content:
-                    if hasattr(block, 'text'):
-                        all_text.append(block.text)
+    async def _request_judgment(prompt: str) -> Dict[str, Any]:
+        all_text = []
+        async for message in query(prompt=prompt, options=options):
+            if hasattr(message, 'content'):
+                if isinstance(message.content, str):
+                    all_text.append(message.content)
+                elif isinstance(message.content, list):
+                    for block in message.content:
+                        if hasattr(block, 'text'):
+                            all_text.append(block.text)
 
-    response_text = "".join(all_text)
+        response_text = "".join(all_text)
 
-    if debug:
-        print(f"Claude response length: {len(response_text)} chars", file=sys.stderr)
-        print(f"First 1000 chars:\n{response_text[:1000]}", file=sys.stderr)
-
-    # Parse the JSON response
-    # Try to find JSON object in the response
-    json_start = response_text.find('{')
-    json_end = response_text.rfind('}') + 1
-
-    if json_start == -1 or json_end == 0:
-        raise ValueError(f"No JSON found in response: {response_text[:500]}")
-
-    json_str = response_text[json_start:json_end]
-
-    try:
-        result = json.loads(json_str)
-    except json.JSONDecodeError as e:
         if debug:
-            print(f"JSON parse error: {e}", file=sys.stderr)
-            print(f"Attempted to parse: {json_str[:500]}...", file=sys.stderr)
-        raise ValueError(f"Failed to parse JSON response: {e}")
+            print(f"Claude response length: {len(response_text)} chars", file=sys.stderr)
+            print(f"First 1000 chars:\n{response_text[:1000]}", file=sys.stderr)
 
-    # Extract final judgments
-    final_judgments = result.get('final_judgments', [])
-    realignment_notes = result.get('realignment_notes', '')
-    function_tracking = result.get('function_call_tracking', {})
+        json_start = response_text.find('{')
+        json_end = response_text.rfind('}') + 1
+
+        if json_start == -1 or json_end == 0:
+            raise ValueError(f"No JSON found in response: {response_text[:500]}")
+
+        json_str = response_text[json_start:json_end]
+
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as e:
+            if debug:
+                print(f"JSON parse error: {e}", file=sys.stderr)
+                print(f"Attempted to parse: {json_str[:500]}...", file=sys.stderr)
+            raise ValueError(f"Failed to parse JSON response: {e}")
+
+    if cross_turn_realignment:
+        formatted_turns = format_turns_for_judge(
+            records, expected_turns, only_turns, turn_taking_data,
+            get_relevant_dimensions_fn, kb_text=kb_text,
+            prompt_visible_kb_text=prompt_visible_kb_text,
+        )
+        prompt = build_judge_user_prompt(
+            formatted_turns,
+            [record["turn"] for record in records],
+            cross_turn_realignment,
+        )
+        result = await _request_judgment(prompt)
+        final_judgments = result.get('final_judgments', [])
+        realignment_notes = result.get('realignment_notes', '')
+        function_tracking = result.get('function_call_tracking', {})
+    else:
+        final_judgments = []
+        realignment_notes = "Cross-turn realignment disabled for rehydrated run."
+        function_tracking = {}
+        prompt_bundles = build_rehydrated_turn_prompt_bundles(
+            records,
+            expected_turns,
+            turn_taking_data=turn_taking_data,
+            get_relevant_dimensions_fn=get_relevant_dimensions_fn,
+            kb_text=kb_text,
+            prompt_visible_kb_text=prompt_visible_kb_text,
+        )
+        for bundle in prompt_bundles:
+            if debug:
+                print(f"Judging rehydrated turn {bundle['turn']} in isolation...", file=sys.stderr)
+            result = await _request_judgment(bundle["prompt"])
+            judgments_for_turn = result.get("final_judgments", [])
+            if len(judgments_for_turn) != 1:
+                raise ValueError(
+                    f"Expected exactly 1 judgment for rehydrated turn {bundle['turn']}, got {len(judgments_for_turn)}"
+                )
+            final_judgments.extend(judgments_for_turn)
 
     if debug:
         print(f"\nRealignment notes: {realignment_notes}", file=sys.stderr)
@@ -1035,6 +1135,8 @@ async def judge_with_claude(
         "summary": build_judge_summary(len(judgments), cross_turn_realignment),
         "model_name": model_name,
         "judge_version": judge_version,
+        "turn_taking_supported": turn_taking_supported,
+        "turn_taking_skip_reason": turn_taking_skip_reason,
     }
 
 
@@ -1056,6 +1158,8 @@ def write_outputs(
     judge_version: Optional[str] = None,
     judge_model: Optional[str] = None,
     realignment_applied: Optional[bool] = None,
+    turn_taking_supported: Optional[bool] = None,
+    turn_taking_skip_reason: Optional[str] = None,
 ) -> None:
     """Write all output files.
 
@@ -1082,6 +1186,8 @@ def write_outputs(
         function_tracking = {}
     if realignment_applied is None:
         realignment_applied = bool(function_tracking)
+    if turn_taking_supported is None:
+        turn_taking_supported = turn_taking_analysis is not None
 
     # 1. {judge_name}_judged.jsonl
     with (run_dir / f"{judge_name}_judged.jsonl").open("w", encoding="utf-8") as f:
@@ -1101,14 +1207,18 @@ def write_outputs(
     # 2. {judge_name}_summary.json
     # Core dimensions: tool_use, instruction_following, kb_grounding are out of ALL turns (75)
     total_turns = len(judgments)
+    actual_tool_calls_by_turn = {
+        rec["turn"]: rec.get("tool_calls", [])
+        for rec in records
+    }
 
     def _tool_pass(turn_num: int, j: Dict[str, Any]) -> bool:
-        # No tool required for this turn → pass
+        tool_score = j["scores"].get("tool_use_correct")
+        actual_tool_calls = actual_tool_calls_by_turn.get(turn_num, [])
         if expected_turns and turn_num < len(expected_turns):
             if expected_turns[turn_num].get("required_function_call") is None:
-                return True
-        # Use judgment: None (not applicable) or True = pass
-        return j["scores"].get("tool_use_correct") is None or j["scores"].get("tool_use_correct") is True
+                return not actual_tool_calls if tool_score is None else tool_score is True
+        return tool_score is True
 
     passes = {
         "turn_taking": sum(
@@ -1158,6 +1268,8 @@ def write_outputs(
         "function_tracking": function_tracking,
         "turn_taking_failures": turn_taking_analysis.get("failed_turns", []) if turn_taking_analysis else [],
         "turn_taking_affected_instruction": turn_taking_affected_instruction,
+        "turn_taking_supported": turn_taking_supported,
+        "turn_taking_skip_reason": turn_taking_skip_reason,
     }
 
     (run_dir / f"{judge_name}_summary.json").write_text(
@@ -1403,11 +1515,27 @@ def main():
         expected_turns=expected_turns,
         judge_version=result.get("judge_version"),
         realignment_applied=result.get("cross_turn_realignment_applied"),
+        turn_taking_supported=result.get("turn_taking_supported"),
+        turn_taking_skip_reason=result.get("turn_taking_skip_reason"),
     )
 
     # Print summary (tool/instruction/kb out of 75; ambiguity/state out of applicable)
     total = len(result["judgments"])
-    tool_pass = sum(1 for j in result["judgments"].values() if j["scores"].get("tool_use_correct") is None or j["scores"]["tool_use_correct"])
+    actual_tool_calls_by_turn = {
+        rec["turn"]: rec.get("tool_calls", [])
+        for rec in records
+    }
+    tool_pass = 0
+    for turn_num, judgment in result["judgments"].items():
+        tool_score = judgment["scores"].get("tool_use_correct")
+        expected_turn = expected_turns[turn_num] if turn_num < len(expected_turns) else {}
+        if expected_turn.get("required_function_call") is None:
+            if not actual_tool_calls_by_turn.get(turn_num) and tool_score is None:
+                tool_pass += 1
+            elif tool_score is True:
+                tool_pass += 1
+        elif tool_score is True:
+            tool_pass += 1
     amb_applicable = [j for j in result["judgments"].values() if j["scores"].get("ambiguity_handling") is not None]
     state_applicable = [j for j in result["judgments"].values() if j["scores"].get("state_tracking") is not None]
     passes = {
@@ -1421,7 +1549,11 @@ def main():
     amb_total = len(amb_applicable)
     state_total = len(state_applicable)
 
-    print(f"Judged {total} turns (with turn-taking analysis)")
+    if result.get("turn_taking_supported", True):
+        print(f"Judged {total} turns (with turn-taking analysis)")
+    else:
+        suffix = f": {result.get('turn_taking_skip_reason')}" if result.get("turn_taking_skip_reason") else ""
+        print(f"Judged {total} turns (without turn-taking analysis{suffix})")
     print(f"  Turn-taking: {passes['turn_taking']}/{total}")
     print(f"  Tool use: {passes['tool_use']}/{total} (out of all turns)")
     print(f"  Instruction following: {passes['instruction']}/{total}")
