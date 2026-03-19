@@ -151,6 +151,14 @@ The judge evaluates each turn on up to 5 dimensions:
 | `state_tracking` | Turns tagged with long-range memory, cancellation flow, or implicit correction | Does the model correctly track information from earlier turns? |
 | `ambiguity_handling` | Turns tagged with ambiguous entity or compound ambiguity | Does the model correctly disambiguate entities and constraints? |
 
+In plain language, these grader metrics mean:
+
+- `tool_use_correct`: The assistant used the right tool at the right time, with the right arguments, and did not skip a required tool call.
+- `instruction_following`: The assistant actually completed the user’s request for that turn. This is about answering the question or advancing the task, not just sounding plausible.
+- `kb_grounding`: The assistant’s factual claims are supported by the benchmark knowledge base or by tool results returned during the conversation.
+- `state_tracking`: The assistant stayed consistent with earlier turns, including prior registrations, cancellations, corrections, and other conversation state.
+- `ambiguity_handling`: The assistant handled under-specified or ambiguous requests correctly, such as asking for clarification when needed or resolving the ambiguity from available context.
+
 For speech-to-speech runs, a 6th dimension is added automatically when a `conversation.wav` file is present:
 
 | Dimension | Description |
