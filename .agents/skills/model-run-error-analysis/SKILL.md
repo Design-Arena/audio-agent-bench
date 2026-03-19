@@ -172,7 +172,9 @@ When presenting the final answer for a multiagent eval:
 - follow with benchmark-by-benchmark error-mode sections
 - include full datapoints inline in readable rich text, not only as a separate markdown artifact
 - keep turn-taking out of the table and writeup unless the user explicitly asked for it
-- save markdown/CSV artifacts under `results/`, but do not make the saved files the only deliverable
+- save structured artifacts under `results/`, but do not make saved files the only deliverable
+- when a benchmark falls back to transcript-first manual review, put that manual review directly in the assistant response instead of writing a separate `manual_error_review.md` file unless the user explicitly asks for a markdown artifact
+- format inline manual review sections nicely and make them easy to read at a glance: use clear section labels, compact tables or bullets where appropriate, and readable full datapoints rather than raw dumps
 
 ## Preferred Entrypoint
 
@@ -361,10 +363,13 @@ When judged artifacts are good, use the standard names:
 - `failure_review_rows.jsonl`
 - `failure_review_rows.csv`
 
-When the review had to fall back to transcript-first manual analysis, prefer names that make that explicit:
-- `manual_error_review.md`
+When the review had to fall back to transcript-first manual analysis:
+- do not create `manual_error_review.md` by default
+- save the structured packet and metadata under `results/` using explicit manual-review names such as:
 - `manual_error_review.csv`
+- `manual_error_review.jsonl`
 - `review_metadata.json`
+- deliver the actual manual review writeup inline in the assistant response so the user can inspect it directly without opening a markdown artifact
 
 The report should include:
 - run path(s) reviewed
@@ -379,12 +384,14 @@ In the final assistant response, also provide a concise plain-text summary:
 - main real error modes per model
 - main grader or benchmark issues
 - main runtime artifacts
-- the path to the saved report and CSV
+- the path to the saved structured artifacts
 
 ## Output Expectations
 
 - Put the report under `results/` by default.
 - Always return a text summary to the user in the same turn. Do not make the markdown file the only deliverable.
+- For transcript-first manual fallback, the primary deliverable is the inline review in the assistant response; saved files should be supporting structured artifacts, not a required markdown narrative.
+- Inline manual fallback review should be polished and easy to scan quickly, not a rough note dump.
 - Use exact dimension counts from judged rows when judged artifacts are usable.
 - If judged artifacts are unusable, say so clearly and switch to transcript-first manual review.
 - Treat broader error modes as analyst-defined clusters, not as a second judge.

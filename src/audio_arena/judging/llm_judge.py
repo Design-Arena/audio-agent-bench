@@ -43,8 +43,8 @@ except ImportError:
 # Configuration
 # ============================================================================
 
-JUDGE_VERSION = "claude-agent-sdk-v16-kb-visible-vs-tool-only"
-REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v16-rehydrated-kb-visible-vs-tool-only"
+JUDGE_VERSION = "claude-agent-sdk-v18-kb-visible-vs-tool-only"
+REHYDRATED_JUDGE_VERSION = "claude-agent-sdk-v18-rehydrated-kb-visible-vs-tool-only"
 JUDGE_MODEL = "claude-opus-4-5"
 
 # System prompt for the two-phase judge
@@ -95,7 +95,9 @@ For each turn, evaluate SIX dimensions:
    - FALSE if a function call was expected, not made, and NOT already made earlier (and none of the above absorption rules apply)
    - If the transcript shows a benchmark-generated tool error such as `UNEXPECTED_TOOL_CALL` or `ARG_MISMATCH`, inspect the actual call carefully before scoring:
      - FALSE when the benchmark error reflects a materially wrong tool, wrong ID, missing required step, or materially wrong arguments
-     - TRUE when the benchmark error is only a benign harness mismatch such as semantically equivalent wording, harmless formatting like `9:15` vs `09:15`, order-insensitive list ordering, or an expected `end_session({})` on a turn whose scripted response payload was omitted
+     - TRUE when the benchmark error is only a benign harness mismatch such as semantically equivalent wording, harmless formatting like `9:15` vs `09:15`, order-insensitive list ordering, capitalization-only differences, punctuation-only differences, or an expected `end_session({})` on a turn whose scripted response payload was omitted
+     - For free-text arguments such as titles, notes, issue descriptions, suggestion text, or similar natural-language fields, prefer semantic equivalence over string identity. Treat the call as correct when the meaning is preserved and no user-visible action is changed, even if casing, articles, punctuation, or minor paraphrase differ.
+     - When you decide an `ARG_MISMATCH` is benign and the call is semantically equivalent, judge the rest of the turn against the intended successful action/result rather than against the raw harness error. Do NOT fail instruction_following or kb_grounding solely because the harness emitted a benign mismatch.
    - FALSE if the assistant's words imply waiting for confirmation but it acts without waiting (words-actions mismatch)
    - For argument matching, use semantic equivalence (not verbatim)
    - IDs must match exactly (session IDs, appointment IDs, cart IDs, order IDs, etc.)
@@ -204,7 +206,9 @@ Three sub-patterns to watch for:
 
 1. **Explicit failure claim**: The spoken text says the action could NOT be completed, failed, or was not performed, even though the tool returned success. Example: assistant calls update_event successfully, but says "I wasn't able to update the phone number" → tool_use_correct=TRUE, instruction_following=FALSE.
 
-2. **Post-action permission seeking**: The spoken text asks the user for permission or confirmation to perform an action that was ALREADY completed via tool call in the same turn. Example: assistant calls update_event(field='date', new_value='2025-03-15') successfully, then says "Would you like me to move the event to March 15th?" or "Shall I go ahead and update the date?" → tool_use_correct=TRUE, instruction_following=FALSE. Similarly, assistant calls request_tech_support successfully, then asks "What is the issue you'd like me to report?" → tool_use_correct=TRUE, instruction_following=FALSE.
+2. **Post-action permission seeking**: The spoken text asks the user for permission or confirmation to perform the SAME action that was ALREADY completed via tool call in the same turn, leaving the completion status unclear or contradicted. Example: assistant calls update_event(field='date', new_value='2025-03-15') successfully, then says "Would you like me to move the event to March 15th?" or "Shall I go ahead and update the date?" → tool_use_correct=TRUE, instruction_following=FALSE. Similarly, assistant calls request_tech_support successfully, then asks "What is the issue you'd like me to report?" → tool_use_correct=TRUE, instruction_following=FALSE.
+
+   **Do NOT fail** this pattern when the assistant clearly confirms that the completed action is done and then smoothly transitions to a logically next action or follow-up question. A response like "Your reservation is confirmed. Would you like me to notify the other attendee too?" should usually pass instruction_following because the completed action is explicit and the follow-up concerns a new next step, not permission to redo the same action.
 
 3. **Ignoring successful tool results**: The tool call succeeds and returns data (e.g., order items, booking details, search results), but the spoken text claims the information could not be retrieved, or omits the data the user explicitly asked for. Example: assistant calls verify_details successfully and the tool returns a full list of 16 order items, but the assistant says "I wasn't able to retrieve the order details" or simply does not read back the items when the user asked for them → tool_use_correct=TRUE, instruction_following=FALSE.
 
@@ -217,8 +221,10 @@ Apply all three sub-patterns consistently. If the assistant's spoken response fa
 When evaluating tool_use_correct, apply these principles consistently:
 
 - **Extra compatible arguments**: If the assistant calls the expected function with all required arguments AND adds additional arguments that are consistent with the conversation context (e.g., adding `doctor` or `time_preference` alongside a required `date` parameter), treat the call as correct. Do not fail tool_use_correct solely because extra compatible arguments were included—only fail if the extra arguments conflict with or distort the expected behavior.
+- **Equivalent time formats**: Treat equivalent clock-time renderings as semantically identical unless the benchmark explicitly distinguishes them. Examples: `15:30` = `3:30 PM`, `09:15` = `9:15 AM`, `15:45` = `3:45 PM`. Do not fail tool_use_correct, instruction_following, or kb_grounding solely because one source uses 24-hour time and another uses 12-hour time for the same clock time.
 - **Broader search queries**: For lookup/search-type functions, if the assistant uses a broader query term that still returns the correct result (e.g., `query="maple"` when the expected query is `query="maple syrup"`, or `query="sourdough"` when expected is `query="sourdough loaf"`), treat the call as semantically equivalent. The key question is whether the query would match the intended item, not whether it is verbatim identical. Conversely, a query that is so broad it would match the wrong item should still be failed.
 - **Narrower but correct queries**: Similarly, if the assistant uses a more specific query that still matches the intended item (e.g., `query="organic free range eggs"` when expected is `query="organic eggs"`), treat as correct as long as the result would be the same item.
+- **Free-text field normalization**: For natural-language arguments such as event titles, notes, support-issue descriptions, or suggestion text, treat non-material wording differences as equivalent when they preserve the same user-visible meaning. Examples: title case vs sentence case, optional leading articles like "the", or notes like "In the board room" vs "Board room". Fail only when the wording change alters the requested action, drops required content, or introduces new factual commitments.
 - **Turn-specific tool-use guidance**: Some benchmark turns include a `Tool Use Guidance` note. Follow it. In particular, if the note explicitly says that an already-established item may be reused from conversation or order state without a redundant `lookup_item` call, then treat the omission of that redundant lookup as acceptable. Only apply this exception when the guidance explicitly allows it and the item facts were already established earlier in the conversation or verified order state.
 
 Apply both principles consistently across all runs of the same turn.

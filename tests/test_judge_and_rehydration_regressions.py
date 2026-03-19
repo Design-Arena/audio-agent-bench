@@ -298,6 +298,23 @@ class JudgeAndRehydrationRegressionTests(unittest.TestCase):
         self.assertIn("benchmark-generated tool error", prompt)
         self.assertIn("9:15", prompt)
         self.assertIn("end_session({})", prompt)
+        self.assertIn("titles, notes, issue descriptions, suggestion text", prompt)
+        self.assertIn("judge the rest of the turn against the intended successful action/result", prompt)
+
+    def test_judge_prompt_treats_free_text_args_semantically(self):
+        prompt = build_judge_system_prompt(cross_turn_realignment=False)
+
+        self.assertIn("Free-text field normalization", prompt)
+        self.assertIn("title case vs sentence case", prompt)
+        self.assertIn('In the board room" vs "Board room', prompt)
+
+    def test_judge_prompt_allows_confirm_then_next_step_after_success(self):
+        prompt = build_judge_system_prompt(cross_turn_realignment=False)
+
+        self.assertIn("Do NOT fail", prompt)
+        self.assertIn("clearly confirms that the completed action is done", prompt)
+        self.assertIn("logically next action or follow-up question", prompt)
+        self.assertIn("Would you like me to notify the other attendee too?", prompt)
 
     def test_rehydrated_run_without_parent_wav_skips_turn_taking_with_reason(self):
         with TemporaryDirectory() as tmpdir:
