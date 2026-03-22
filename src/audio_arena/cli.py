@@ -858,9 +858,6 @@ async def _run_rehydrated(
     click.echo(f"  Transcript: {run_dir / 'transcript.jsonl'}")
 
 
-NON_CONVO_BENCHMARKS = {"appointment_bench", "event_bench", "grocery_bench"}
-
-
 @cli.command()
 @click.argument("run_dir", type=click.Path(exists=True))
 @click.option("--only-turns", help="Comma-separated turn indices to judge (e.g., 0,1,2)")
@@ -869,9 +866,9 @@ NON_CONVO_BENCHMARKS = {"appointment_bench", "event_bench", "grocery_bench"}
     "judge_backend",
     type=click.Choice(["claude", "openai"], case_sensitive=False),
     default=None,
-    help="Judge backend to use. Defaults to 'openai' for non-convo benchmarks, 'claude' for conversation_bench.",
+    help="Judge backend to use. Defaults to 'claude' for all benchmarks.",
 )
-@click.option("--judge-model", default=None, help="Model for judging (default: claude-opus-4-5 or o3)")
+@click.option("--judge-model", default=None, help="Model for judging (default: claude-opus-4-5 for Claude, gpt-5.2 for OpenAI)")
 @click.option("--skip-turn-taking", is_flag=True, help="Skip audio turn-taking analysis (faster; all turns count as turn_taking=True)")
 @click.option("--debug", is_flag=True, help="Enable debug logging")
 def judge(
@@ -894,12 +891,8 @@ def judge(
     # Infer benchmark from path: runs/{benchmark}/{timestamp}_{model}/
     benchmark_name = run_path.parent.name
 
-    # Auto-select judge backend based on benchmark type
     if judge_backend is None:
-        if benchmark_name in NON_CONVO_BENCHMARKS:
-            judge_backend = "openai"
-        else:
-            judge_backend = "claude"
+        judge_backend = "claude"
     click.echo(f"Using {judge_backend} judge for {benchmark_name}")
 
     # Load transcript
