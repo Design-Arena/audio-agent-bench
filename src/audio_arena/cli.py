@@ -242,21 +242,26 @@ def create_run_directory(benchmark_name: str, model: str) -> Path:
     return run_dir
 
 
+_logging_initialized = False
+
+
 def setup_logging(run_dir: Path, verbose: bool = False):
-    """Configure logging to both console and run directory."""
-    level = logging.DEBUG if verbose else logging.INFO
+    """Configure logging to both console and run directory.
 
-    # Remove default loguru handler
-    logger.remove()
+    The global logger.remove() + console handler setup only runs once so that
+    parallel callers (e.g. run_all_benchmarks.py) don't destroy each other's
+    per-turn sinks.  Each call still adds its own per-run file sink.
+    """
+    global _logging_initialized
+    if not _logging_initialized:
+        logger.remove()
+        logger.add(
+            sys.stderr,
+            level="INFO" if not verbose else "DEBUG",
+            format="<level>{message}</level>",
+        )
+        _logging_initialized = True
 
-    # Console handler
-    logger.add(
-        sys.stderr,
-        level="INFO" if not verbose else "DEBUG",
-        format="<level>{message}</level>",
-    )
-
-    # File handler (always DEBUG for debugging failed runs)
     logger.add(
         run_dir / "run.log",
         level="DEBUG",
@@ -448,6 +453,7 @@ def cli():
     help='Use real (human-recorded) audio. Pass a speaker name (e.g., "person1") or "all" to run every speaker.',
 )
 @click.option("--verbose", "-v", is_flag=True, help="Enable verbose logging")
+@click.option("--skip-audio", is_flag=True, help="Skip saving conversation.wav audio recording (saves disk space).")
 def run(
     benchmark_name: str,
     model: str,
@@ -459,6 +465,7 @@ def run(
     disable_vad: bool,
     real_audio_speaker: Optional[str],
     verbose: bool,
+    skip_audio: bool,
 ):
     """Run a benchmark against an LLM.
 
@@ -474,6 +481,9 @@ def run(
         uv run audio-arena run conversation_bench --model claude-sonnet-4-5 --service anthropic
     """
     model, service, pipeline = resolve_model_alias(model, service, pipeline)
+
+    if skip_audio:
+        os.environ["SKIP_AUDIO_RECORDING"] = "1"
 
     if real_audio_speaker and real_audio_speaker.lower() == "all":
         _run_all_speakers(
@@ -834,7 +844,10 @@ async def _run_rehydrated(
                 }
             finally:
                 recorder.close()
-                logger.remove(turn_sink_id)
+                try:
+                    logger.remove(turn_sink_id)
+                except ValueError:
+                    pass
 
     semaphore = asyncio.Semaphore(max_parallel)
     tasks = [_run_single_turn(semaphore, idx) for idx in target_indices]
