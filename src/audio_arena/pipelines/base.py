@@ -488,10 +488,26 @@ class BasePipeline(ABC):
         cls,
         expected_args: Dict[str, Any],
         actual_args: Dict[str, Any],
+        *,
+        flexible_keys: Optional[list] = None,
     ) -> bool:
-        """Return True for conservative semantic matches the runtime should accept."""
-        expected = cls._canonicalize_tool_arg_value(expected_args or {})
-        actual = cls._canonicalize_tool_arg_value(actual_args or {})
+        """Return True for conservative semantic matches the runtime should accept.
+
+        Args whose keys appear in *flexible_keys* are excluded from the
+        comparison so that free-text fields (search queries, messages, etc.)
+        do not cause spurious ARG_MISMATCH errors.
+        """
+        ea = expected_args or {}
+        aa = actual_args or {}
+        if flexible_keys:
+            for fk in flexible_keys:
+                val = aa.get(fk)
+                if fk in ea and (val is None or (isinstance(val, str) and not val.strip())):
+                    return False
+            ea = {k: v for k, v in ea.items() if k not in flexible_keys}
+            aa = {k: v for k, v in aa.items() if k not in flexible_keys}
+        expected = cls._canonicalize_tool_arg_value(ea)
+        actual = cls._canonicalize_tool_arg_value(aa)
         return expected == actual
 
     def _get_turn_tool_response(
@@ -534,7 +550,8 @@ class BasePipeline(ABC):
                     expected_args=required_calls.get("args"),
                 )
             expected_args = required_calls.get("args", {})
-            if not self._tool_args_match(expected_args, arguments):
+            flex = current_turn.get("flexible_args")
+            if not self._tool_args_match(expected_args, arguments, flexible_keys=flex):
                 return self._build_tool_error(
                     function_name=function_name,
                     arguments=arguments,
@@ -574,7 +591,8 @@ class BasePipeline(ABC):
                     continue
                 if required_call.get("name") != function_name:
                     continue
-                if self._tool_args_match(required_call.get("args", {}), arguments):
+                flex = required_call.get("flexible_args")
+                if self._tool_args_match(required_call.get("args", {}), arguments, flexible_keys=flex):
                     self._consumed_tool_response_indices.add(idx)
                     self._tool_response_idx = max(self._tool_response_idx, idx + 1)
                     return custom_response[idx]

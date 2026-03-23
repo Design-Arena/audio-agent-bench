@@ -54,6 +54,7 @@ turns = [
                 "Added to your order.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'flour'}},
+ 'flexible_args': ['query'],
  'tool_use_guidance': "First discovery of flour in this session. Require "
                       "lookup_item even if the model can infer the answer "
                       "from prompt context.",
@@ -82,6 +83,7 @@ turns = [
                 "loaf, not the rolls. Adding that.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'sourdough loaf'}},
+ 'flexible_args': ['query'],
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '5010',
                                          'name': 'Sourdough Loaf',
@@ -96,6 +98,7 @@ turns = [
                 "dozens would you like?",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'organic eggs'}},
+ 'flexible_args': ['query'],
  'tool_use_guidance': "First discovery of organic eggs in this session. "
                       "Require lookup_item even if the spoken answer is "
                       "otherwise correct.",
@@ -122,6 +125,7 @@ turns = [
                 "Added.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'gray sea salt'}},
+ 'flexible_args': ['query'],
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '3010',
                                          'name': 'Gray Sea Salt',
@@ -153,6 +157,7 @@ turns = [
                 "ninety-nine. Added.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'maple syrup'}},
+ 'flexible_args': ['query'],
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '1330',
                                          'name': 'Maple Syrup (Grade A)',
@@ -176,6 +181,7 @@ turns = [
                 "Added.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'maple candy'}},
+ 'flexible_args': ['query'],
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '1303',
                                          'name': 'Maple Candy',
@@ -201,6 +207,7 @@ turns = [
                 "ninety-nine. Added.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'olive oil'}},
+ 'flexible_args': ['query'],
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '4015',
                                          'name': 'Extra Virgin Olive Oil',
@@ -215,6 +222,7 @@ turns = [
                 "Added — that's separate from the olive oil.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'olives'}},
+ 'flexible_args': ['query'],
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '4051',
                                          'name': 'Kalamata Olives',
@@ -230,6 +238,7 @@ turns = [
                 "jar for five ninety-nine. Adding both to your order.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'italian'}},
+ 'flexible_args': ['query'],
  'function_call_response': {'status': 'success',
                             'results': [{'item_id': '6020',
                                          'name': 'Italian Parsley',
@@ -249,9 +258,9 @@ turns = [
                 "Vanilla Extract, four-ounce bottle for eleven ninety-nine. "
                 "All three added.",
  'required_function_call': [
-     {'name': 'lookup_item', 'args': {'query': 'honey'}},
-     {'name': 'lookup_item', 'args': {'query': 'balsamic vinegar'}},
-     {'name': 'lookup_item', 'args': {'query': 'vanilla extract'}}],
+     {'name': 'lookup_item', 'args': {'query': 'honey'}, 'flexible_args': ['query']},
+     {'name': 'lookup_item', 'args': {'query': 'balsamic vinegar'}, 'flexible_args': ['query']},
+     {'name': 'lookup_item', 'args': {'query': 'vanilla extract'}, 'flexible_args': ['query']}],
  'function_call_response': [
      {'status': 'success',
       'results': [{'item_id': '4030',
@@ -283,6 +292,7 @@ turns = [
                 "order.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'flower bouquet'}},
+ 'flexible_args': ['query'],
  'tool_use_guidance': "First discovery of flower bouquet in this session. "
                       "Require lookup_item; do not treat flour/flower "
                       "homophone recall alone as sufficient grounding.",
@@ -300,6 +310,7 @@ turns = [
                 "that's under seven dollars, so I'm adding it.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'whole milk'}},
+ 'flexible_args': ['query'],
  'tool_use_guidance': "Whole milk is a new catalog item here. Require "
                       "lookup_item before deciding whether the under-$7 "
                       "condition is satisfied.",
@@ -333,6 +344,7 @@ turns = [
                 "subtotal is now one hundred eighty-nine eighteen.",
  'required_function_call': {'name': 'lookup_item',
                             'args': {'query': 'organic bananas'}},
+ 'flexible_args': ['query'],
  'tool_use_guidance': "Organic bananas are introduced for the first time on "
                       "this turn, so require lookup_item before pricing and "
                       "subtotal math.",
@@ -487,7 +499,7 @@ turns = [
                'action': 'remove',
                'item_name': 'Maple Candy'}},
      {'name': 'lookup_item',
-      'args': {'query': 'dijon mustard'}},
+      'args': {'query': 'dijon mustard'}, 'flexible_args': ['query']},
      {'name': 'update_order',
       'args': {'order_id': 'ORD-5521',
                'action': 'remove',

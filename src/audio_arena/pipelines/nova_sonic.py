@@ -1214,6 +1214,8 @@ class NovaSonicPipeline:
         self._duplicate_tool_call_ids: set = set()
         # Track which response index we're on for multi-step tool chains
         self._tool_response_idx: int = 0
+        # Track which multi-call response indices have been consumed (order-independent matching)
+        self._consumed_tool_response_indices: set = set()
         # Last tool result (for logging/debugging)
         self._last_tool_result: Optional[dict] = None
 
@@ -1378,26 +1380,26 @@ class NovaSonicPipeline:
         )
 
         # Register function handler
+        from audio_arena.pipelines.base import BasePipeline
         from pipecat.services.llm_service import FunctionCallParams
 
         async def function_catchall(params: FunctionCallParams):
             """Handle tool calls with correct per-turn responses.
 
-            Mirrors BasePipeline._function_catchall: supports custom
-            function_call_response (single or list), duplicate detection,
-            multi-step tool chains, and end_session handling.
+            Mirrors BasePipeline._get_turn_tool_response: validates function
+            name and arguments against required_function_call (with
+            flexible_args support), returns UNEXPECTED_TOOL_CALL or
+            ARG_MISMATCH errors for mismatches, and supports duplicate
+            detection and end_session handling.
             """
-            # Create a key for duplicate detection (function_name + args)
             call_key = (params.function_name, str(params.arguments or {}))
 
-            # Check for duplicate tool call
             if call_key in self._seen_tool_calls:
                 tool_call_id = getattr(params, 'tool_call_id', None)
                 logger.warning(
                     f"Skipping duplicate tool call: {params.function_name} "
                     f"(tool_call_id={tool_call_id})"
                 )
-                # Track this tool_call_id as a duplicate so ToolCallRecorder can filter it
                 if tool_call_id:
                     self._duplicate_tool_call_ids.add(tool_call_id)
                 skip_result = {"status": "duplicate_skipped"}
@@ -1405,29 +1407,100 @@ class NovaSonicPipeline:
                 await params.result_callback(skip_result)
                 return
 
-            # Track this call
             self._seen_tool_calls.add(call_key)
 
-            # Check if the current turn has a custom function_call_response
-            # Supports both single responses and lists of responses for multi-step tool chains
+            fn = params.function_name
+            args = params.arguments or {}
             result = {"status": "success"}
+
             if self.turn_idx < len(self.effective_turns):
                 current_turn = self.effective_turns[self.turn_idx]
                 custom_response = current_turn.get("function_call_response")
-                if custom_response is not None:
-                    if isinstance(custom_response, list):
-                        # Multi-step tool chain: use response at current index
-                        if self._tool_response_idx < len(custom_response):
-                            result = custom_response[self._tool_response_idx]
-                            self._tool_response_idx += 1
-                        else:
-                            logger.warning(
-                                f"Tool response index {self._tool_response_idx} exceeds "
-                                f"available responses ({len(custom_response)}) - using default"
-                            )
+                required_calls = current_turn.get("required_function_call")
+
+                if required_calls is None:
+                    result = BasePipeline._build_tool_error(
+                        function_name=fn, arguments=args,
+                        error_code="UNEXPECTED_TOOL_CALL",
+                        message="No tool call is expected on this turn.",
+                        expected_function=None, expected_args=None,
+                    )
+                elif isinstance(required_calls, dict):
+                    expected_name = required_calls.get("name")
+                    if fn != expected_name:
+                        result = BasePipeline._build_tool_error(
+                            function_name=fn, arguments=args,
+                            error_code="UNEXPECTED_TOOL_CALL",
+                            message="The called tool does not match the scripted tool for this turn.",
+                            expected_function=expected_name,
+                            expected_args=required_calls.get("args"),
+                        )
                     else:
-                        # Single response (backward compatible)
-                        result = custom_response
+                        expected_args = required_calls.get("args", {})
+                        flex = current_turn.get("flexible_args")
+                        if not BasePipeline._tool_args_match(expected_args, args, flexible_keys=flex):
+                            result = BasePipeline._build_tool_error(
+                                function_name=fn, arguments=args,
+                                error_code="ARG_MISMATCH",
+                                message="The tool name matches, but the arguments do not match the scripted tool call for this turn.",
+                                expected_function=expected_name,
+                                expected_args=expected_args,
+                            )
+                        elif custom_response is None and fn == "end_session":
+                            pass
+                        elif custom_response is None:
+                            result = BasePipeline._build_tool_error(
+                                function_name=fn, arguments=args,
+                                error_code="UNEXPECTED_TOOL_CALL",
+                                message="This tool call does not match the scripted tool behavior for the turn.",
+                                expected_function=expected_name,
+                                expected_args=expected_args,
+                            )
+                        else:
+                            result = custom_response if not isinstance(custom_response, list) else custom_response[0]
+                else:
+                    if not isinstance(custom_response, list):
+                        result = BasePipeline._build_tool_error(
+                            function_name=fn, arguments=args,
+                            error_code="UNEXPECTED_TOOL_CALL",
+                            message="The scripted tool responses for this turn are inconsistent.",
+                            expected_function=None, expected_args=None,
+                        )
+                    elif isinstance(required_calls, list) and len(required_calls) == len(custom_response):
+                        matched = False
+                        for idx, required_call in enumerate(required_calls):
+                            if idx in self._consumed_tool_response_indices:
+                                continue
+                            if required_call.get("name") != fn:
+                                continue
+                            flex = required_call.get("flexible_args")
+                            if BasePipeline._tool_args_match(required_call.get("args", {}), args, flexible_keys=flex):
+                                self._consumed_tool_response_indices.add(idx)
+                                self._tool_response_idx = max(self._tool_response_idx, idx + 1)
+                                result = custom_response[idx]
+                                matched = True
+                                break
+                        if not matched:
+                            matching_calls = [
+                                rc for rc in required_calls if rc.get("name") == fn
+                            ]
+                            if matching_calls:
+                                result = BasePipeline._build_tool_error(
+                                    function_name=fn, arguments=args,
+                                    error_code="ARG_MISMATCH",
+                                    message="The tool name matches, but the arguments do not match any scripted tool call for this turn.",
+                                    expected_function=fn,
+                                    expected_args=[c.get("args", {}) for c in matching_calls],
+                                )
+                            else:
+                                expected_names = [rc.get("name") for rc in required_calls]
+                                result = BasePipeline._build_tool_error(
+                                    function_name=fn, arguments=args,
+                                    error_code="UNEXPECTED_TOOL_CALL",
+                                    message="The called tool does not match any scripted tool for this turn.",
+                                    expected_function=expected_names,
+                                    expected_args=[c.get("args", {}) for c in required_calls],
+                                )
 
             self._last_tool_result = result
             await params.result_callback(result)
@@ -1500,6 +1573,7 @@ class NovaSonicPipeline:
             self._seen_tool_calls.clear()
             self._duplicate_tool_call_ids.clear()
             self._tool_response_idx = 0
+            self._consumed_tool_response_indices.clear()
 
             if self.turn_idx < len(self.effective_turns):
                 # Proactive session rotation before queuing next turn
