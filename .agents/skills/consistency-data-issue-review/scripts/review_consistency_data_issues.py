@@ -363,8 +363,12 @@ def write_markdown_report(
             f"unstable_metric_turns={row.unstable_metric_turns}/{row.turns}"
         )
 
-    strong_df = suspected_issues_df[suspected_issues_df["confidence"] == "strong"]
-    possible_df = suspected_issues_df[suspected_issues_df["confidence"] != "strong"]
+    if suspected_issues_df.empty or "confidence" not in suspected_issues_df.columns:
+        strong_df = pd.DataFrame()
+        possible_df = pd.DataFrame()
+    else:
+        strong_df = suspected_issues_df[suspected_issues_df["confidence"] == "strong"]
+        possible_df = suspected_issues_df[suspected_issues_df["confidence"] != "strong"]
 
     for title, frame in [("Strong Candidates", strong_df), ("Possible Candidates", possible_df)]:
         lines.extend(["", f"## {title}"])
@@ -389,8 +393,12 @@ def render_html(
     model_label: str,
     suspected_issues_df: pd.DataFrame,
 ) -> None:
-    strong_df = suspected_issues_df[suspected_issues_df["confidence"] == "strong"]
-    possible_df = suspected_issues_df[suspected_issues_df["confidence"] != "strong"]
+    if suspected_issues_df.empty or "confidence" not in suspected_issues_df.columns:
+        strong_df = pd.DataFrame()
+        possible_df = pd.DataFrame()
+    else:
+        strong_df = suspected_issues_df[suspected_issues_df["confidence"] == "strong"]
+        possible_df = suspected_issues_df[suspected_issues_df["confidence"] != "strong"]
 
     def render_cards(frame: pd.DataFrame, badge_class: str, badge_label: str) -> str:
         if frame.empty:
