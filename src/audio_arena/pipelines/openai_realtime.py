@@ -1,65 +1,17 @@
-"""OpenAI Realtime with explicit tool result delivery.
+"""OpenAI Realtime helpers for explicit tool-result delivery and history seeding.
 
-Only the OpenAI Realtime protocol (and xAI's compatible one) requires the client to
-push the tool result over the WebSocket—conversation.item.create (function_call_output)
-then response.create. Other providers (text, Gemini Live, Ultravox, Nova Sonic) use
-request/response or other flows where Pipecat delivers the handler result without
-this extra step.
-
-We subclass Pipecat's OpenAIRealtimeLLMService to send the function call output
-ourselves so the audio model only continues (and speaks) after receiving the tool
-result in context.
-
-Explicit results for APIs (GPT / Grok only):
-  We send the actual result from our pipeline handler, not a hardcoded
-  {"status": "success"}. The pipeline sets _last_tool_result in _function_catchall
-  and passes a getter (get_last_tool_result) into this service so we send that
-  payload—e.g. per-turn function_call_response—to the API.
-
-Why the constructor takes get_last_tool_result (constructor diff vs base):
-  The pipeline and the LLM service are different objects. The handler that knows
-  the real result (_function_catchall) runs on the pipeline and sets
-  pipeline._last_tool_result. When we send the WebSocket event we're inside the
-  *service* (e.g. in _handle_evt_function_call_arguments_done); the service has
-  no reference to the pipeline, so it can't read pipeline._last_tool_result
-  directly.   So when the pipeline *creates* the service it passes a getter,
-  e.g. lambda: getattr(self, "_last_tool_result", {"status": "success"}),
-  that closes over the pipeline. Later, when the service sends the event it
-  calls get_last_tool_result(); that runs the lambda, which reads the pipeline's
-  _last_tool_result and returns it.
-
-  We could hardcode one payload in the service (e.g. {"status": "success"}), but
-  we can't hardcode *per call* here—the service has no turn index or benchmark
-  data; only the pipeline does. So we have to use the getter to pull the
-  pipeline's result into the service when we send the event.
-
-  How we know it's the right result for this call: we call the getter only after
-  run_function_calls() returns. That await runs our handler (_function_catchall)
-  for this one call; the handler sets _last_tool_result and then returns.
-  Execution is sequential per event—no other tool call runs in between.
-
-  Deferred response.create:
-  The OpenAI Realtime API fires response.function_call_arguments.done *during*
-  the active response (before response.done). Sending response.create at that
-  point triggers "conversation_already_has_active_response" and kills the
-  websocket.
-
-  Additionally, Pipecat's base class has a context-update path:
-  run_function_calls() → context update → _process_completed_function_calls()
-  → _send_tool_result() + _create_response(). This also sends response.create
-  during the active response.
-
-  We solve both problems by:
-  1. Completely overriding _handle_evt_function_call_arguments_done (no super())
-     to run the tool ourselves and send our own function_call_output
-  2. Pre-marking the tool_call_id as completed so the base class's
-     _process_completed_function_calls() skips it
-  3. Deferring response.create to _handle_evt_response_done, which fires
-     after the response is complete and there is no active response
+This file exists because OpenAI Realtime needs client-side event choreography that
+the generic pipeline path does not handle:
+- after a tool call, send ``function_call_output`` as a conversation item
+- only send ``response.create`` after the active response has finished
+- when server VAD is disabled, manually commit input audio and trigger a response
+- seed prior turns into the live session for rehydrated runs
 """
 
 import asyncio
 import json
+import time
+import uuid
 from typing import Callable, Optional
 
 from loguru import logger
@@ -139,11 +91,11 @@ class ReconnectOnDisconnectMixin:
         Call this at the end of ``_receive_task_handler()`` to detect
         unexpected disconnections and trigger automatic reconnection.
         """
-        if getattr(self, '_disconnecting', False):
+        if self._disconnecting:
             return
 
-        close_code = getattr(self._websocket, 'close_code', None) if self._websocket else None
-        close_reason = getattr(self._websocket, 'close_reason', '') if self._websocket else ''
+        close_code = self._websocket.close_code if self._websocket else None
+        close_reason = self._websocket.close_reason if self._websocket else ""
 
         if close_code is not None and close_code != 1000:
             logger.warning(
@@ -170,8 +122,9 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
     2. We run the tool handler ourselves (run_function_calls)
     3. We pre-mark the call as completed to prevent base class auto-send
     4. We send conversation.item.create (function_call_output) with our result
-    5. response.done fires (response is now complete)
-    6. We send response.create to trigger the model to continue
+    5. The server acknowledges the created function_call_output item
+    6. response.done fires (response is now complete)
+    7. We send response.create to trigger the model to continue
     """
 
     def __init__(
@@ -179,34 +132,155 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         get_last_tool_result: Optional[Callable[[], dict]] = None,
         on_reconnecting: Optional[Callable[[], None]] = None,
         on_reconnected: Optional[Callable[[], None]] = None,
+        rehydration_history_items: Optional[list[rt_events.ConversationItem]] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self._get_last_tool_result = get_last_tool_result
         self._init_reconnection_callbacks(on_reconnecting, on_reconnected)
-        # Flag: when True, _handle_evt_response_done will send response.create
         self._pending_response_create = False
+        self._waiting_for_response_done_before_response_create = False
+        self._pending_tool_output_item_ids: set[str] = set()
+        self._rehydration_history_items = list(rehydration_history_items or [])
+        self._rehydration_history_seeded = False
+        self._awaiting_manual_audio_commit = False
+        self._manual_turn_input_committed = False
+        self._manual_response_in_flight = False
+        self._last_manual_commit_monotonic = 0.0
 
-    async def _handle_evt_function_call_arguments_done(self, evt):
-        """Handle function call completion: run tool, send result, defer response.create.
-
-        We completely override (no super()) to prevent the base class's
-        _process_completed_function_calls path from sending response.create
-        during the active response.
-        """
-        call_id = getattr(evt, "call_id", None)
-        if call_id is None:
+    async def _maybe_send_deferred_response_create(self, trigger: str) -> None:
+        if not self._pending_response_create:
             return
 
-        # --- Replicate the base class's tool execution (without its auto-send) ---
+        if self._waiting_for_response_done_before_response_create:
+            logger.debug(
+                "[OpenAI Realtime] Deferred response.create still waiting for response.done "
+                f"(trigger={trigger})"
+            )
+            return
+
+        if self._pending_tool_output_item_ids:
+            logger.debug(
+                "[OpenAI Realtime] Deferred response.create still waiting for tool-output ack(s) "
+                f"{sorted(self._pending_tool_output_item_ids)} (trigger={trigger})"
+            )
+            return
+
+        self._pending_response_create = False
+        await self.send_client_event(rt_events.ResponseCreateEvent())
+        logger.info(
+            "[OpenAI Realtime] Sent deferred response.create after response.done and "
+            f"tool-output ack (trigger={trigger})"
+        )
+
+    async def _handle_tool_output_item_event(self, evt, phase: str) -> None:
+        item = evt.item
+        if item.type != "function_call_output" or item.id not in self._pending_tool_output_item_ids:
+            return
+
+        self._pending_tool_output_item_ids.remove(item.id)
+        logger.info(
+            "[OpenAI Realtime] Tool output item acknowledged by server "
+            f"(phase={phase}, item_id={item.id}, call_id={item.call_id})"
+        )
+        await self._maybe_send_deferred_response_create(
+            trigger=f"conversation.item.{phase}:{item.id}"
+        )
+
+    def _manual_turn_handling_active(self) -> bool:
+        return bool(
+            self._session_properties.audio
+            and self._session_properties.audio.input
+            and self._session_properties.audio.input.turn_detection is False
+        )
+
+    def reset_manual_turn_state(self) -> None:
+        """Clear per-turn debounce state before queuing fresh user audio."""
+        self._awaiting_manual_audio_commit = False
+        self._manual_turn_input_committed = False
+        self._manual_response_in_flight = False
+        self._last_manual_commit_monotonic = 0.0
+
+    async def seed_rehydration_history(self) -> None:
+        """Seed prior turns into the live session with conversation.item.create."""
+        if self._rehydration_history_seeded or not self._rehydration_history_items:
+            return
+
+        for _ in range(100):
+            if self._api_session_ready:
+                break
+            await asyncio.sleep(0.1)
+
+        if not self._api_session_ready:
+            raise RuntimeError("OpenAI Realtime session was not ready before rehydration seeding")
+
+        for item in self._rehydration_history_items:
+            self._messages_added_manually[item.id] = True
+            await self.send_client_event(rt_events.ConversationItemCreateEvent(item=item))
+
+        self._rehydration_history_seeded = True
+        logger.info(
+            f"[OpenAI Realtime] Seeded {len(self._rehydration_history_items)} rehydration "
+            "history items via conversation.item.create"
+        )
+
+    async def _handle_user_stopped_speaking(self, frame):
+        """Debounce manual commit/response.create when server-side VAD is disabled."""
+        if not self._manual_turn_handling_active():
+            await super()._handle_user_stopped_speaking(frame)
+            return
+
+        if self._awaiting_manual_audio_commit:
+            logger.warning("[OpenAI Realtime] Already waiting for input_audio_buffer.committed; ignoring duplicate stop event")
+            return
+
+        if self._manual_turn_input_committed:
+            logger.debug(
+                "[OpenAI Realtime] Ignoring duplicate user stop event after turn audio was already committed"
+            )
+            return
+
+        if self._manual_response_in_flight:
+            logger.debug("[OpenAI Realtime] Ignoring user stop event while response is still in flight")
+            return
+
+        now = time.monotonic()
+        if now - self._last_manual_commit_monotonic < 0.75:
+            logger.debug("[OpenAI Realtime] Debouncing duplicate user stop event")
+            return
+
+        # With turn_detection=False the server will not auto-commit buffered audio
+        # or start a response for us. We have to do both explicitly here.
+        self._awaiting_manual_audio_commit = True
+        await self.send_client_event(rt_events.InputAudioBufferCommitEvent())
+        await self.send_client_event(rt_events.ResponseCreateEvent())
+        self._manual_response_in_flight = True
+        self._last_manual_commit_monotonic = now
+        logger.info("[OpenAI Realtime] Sent input_audio_buffer.commit and response.create")
+
+    async def _handle_evt_input_audio_buffer_committed(self, evt):
+        if not self._manual_turn_handling_active():
+            return
+        if not self._awaiting_manual_audio_commit:
+            logger.debug(
+                f"[OpenAI Realtime] input_audio_buffer.committed received without pending manual commit (item_id={evt.item_id})"
+            )
+            return
+
+        self._awaiting_manual_audio_commit = False
+        self._manual_turn_input_committed = True
+        logger.info(f"[OpenAI Realtime] Input audio committed (item_id={evt.item_id})")
+
+    async def _handle_evt_function_call_arguments_done(self, evt):
+        """Run the tool, push function_call_output, and continue after response.done."""
+        call_id = evt.call_id
         try:
             args = json.loads(evt.arguments)
             function_call_item = self._pending_function_calls.get(call_id)
             if function_call_item:
                 del self._pending_function_calls[call_id]
-
-                # Pre-mark this tool_call_id as completed BEFORE run_function_calls
-                # so _process_completed_function_calls() won't auto-send it
+                # Mark the call as completed before run_function_calls() returns so
+                # the base class does not try to auto-send the tool result itself.
                 self._completed_tool_calls.add(call_id)
 
                 function_calls = [
@@ -226,26 +300,45 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
             logger.error(f"[OpenAI Realtime] Failed to process function call: {e}")
             return
 
-        # --- Send our explicit tool result ---
         tool_result = (
             self._get_last_tool_result()
             if self._get_last_tool_result
             else {"status": "success"}
         )
         output_json = json.dumps(tool_result)
+        tool_output_item_id = uuid.uuid4().hex
+        self._pending_tool_output_item_ids.add(tool_output_item_id)
         create_ev = rt_events.ConversationItemCreateEvent(
             item=rt_events.ConversationItem(
+                id=tool_output_item_id,
                 type="function_call_output",
                 call_id=call_id,
                 output=output_json,
             )
         )
-        await self.send_client_event(create_ev)
-        logger.info(f"[OpenAI Realtime] Sent function_call_output for call_id={call_id}")
-
-        # Defer response.create until the current response is complete (response.done).
+        # response.function_call_arguments.done arrives while the original response
+        # is still active. We need two separate gates before continuing:
+        # 1. response.done, otherwise response.create can hit
+        #    conversation_already_has_active_response
+        # 2. a server-side ack that the function_call_output item was committed
+        #    to conversation state
         self._pending_response_create = True
-        logger.info("[OpenAI Realtime] Deferred response.create until response.done")
+        self._waiting_for_response_done_before_response_create = True
+
+        try:
+            await self.send_client_event(create_ev)
+        except Exception:
+            self._pending_tool_output_item_ids.discard(tool_output_item_id)
+            if not self._pending_tool_output_item_ids:
+                self._pending_response_create = False
+                self._waiting_for_response_done_before_response_create = False
+            raise
+
+        logger.info(f"[OpenAI Realtime] Sent function_call_output for call_id={call_id}")
+        logger.info(
+            "[OpenAI Realtime] Deferred response.create until response.done and "
+            f"tool-output ack (item_id={tool_output_item_id})"
+        )
 
     async def _handle_evt_response_done(self, evt):
         """Handle response.done: call super, then send deferred response.create if needed.
@@ -255,13 +348,76 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
         result in context.
         """
         await super()._handle_evt_response_done(evt)
+        self._manual_response_in_flight = False
 
         if self._pending_response_create:
-            self._pending_response_create = False
-            await self.send_client_event(rt_events.ResponseCreateEvent())
-            logger.info("[OpenAI Realtime] Sent deferred response.create after response.done")
+            self._waiting_for_response_done_before_response_create = False
+            await self._maybe_send_deferred_response_create(trigger="response.done")
+
+    async def _handle_evt_conversation_item_added(self, evt):
+        await super()._handle_evt_conversation_item_added(evt)
+        await self._handle_tool_output_item_event(evt, phase="added")
+
+    async def _handle_evt_conversation_item_done(self, evt):
+        await super()._handle_evt_conversation_item_done(evt)
+        await self._handle_tool_output_item_event(evt, phase="done")
+
+    async def _handle_evt_error(self, evt):
+        error = evt.error
+        if (
+            self._manual_turn_handling_active()
+            and error is not None
+            and error.code == "conversation_already_has_active_response"
+        ):
+            self._awaiting_manual_audio_commit = False
+            self._manual_response_in_flight = True
+            logger.warning(
+                "[OpenAI Realtime] Ignoring conversation_already_has_active_response in manual mode; "
+                "waiting for current response to finish"
+            )
+            return True
+        await super()._handle_evt_error(evt)
+        return False
 
     async def _receive_task_handler(self):
-        """Override to detect unexpected disconnections and reconnect."""
-        await super()._receive_task_handler()
+        """Extend the base receive loop with input_audio_buffer.committed handling."""
+        async for message in self._websocket:
+            evt = rt_events.parse_server_event(message)
+            if evt.type == "session.created":
+                await self._handle_evt_session_created(evt)
+            elif evt.type == "session.updated":
+                await self._handle_evt_session_updated(evt)
+            elif evt.type == "response.output_audio.delta":
+                await self._handle_evt_audio_delta(evt)
+            elif evt.type == "response.output_audio.done":
+                await self._handle_evt_audio_done(evt)
+            elif evt.type == "conversation.item.added":
+                await self._handle_evt_conversation_item_added(evt)
+            elif evt.type == "conversation.item.done":
+                await self._handle_evt_conversation_item_done(evt)
+            elif evt.type == "conversation.item.input_audio_transcription.delta":
+                await self._handle_evt_input_audio_transcription_delta(evt)
+            elif evt.type == "conversation.item.input_audio_transcription.completed":
+                await self.handle_evt_input_audio_transcription_completed(evt)
+            elif evt.type == "conversation.item.retrieved":
+                await self._handle_conversation_item_retrieved(evt)
+            elif evt.type == "response.done":
+                await self._handle_evt_response_done(evt)
+            elif evt.type == "input_audio_buffer.speech_started":
+                await self._handle_evt_speech_started(evt)
+            elif evt.type == "input_audio_buffer.speech_stopped":
+                await self._handle_evt_speech_stopped(evt)
+            elif evt.type == "input_audio_buffer.committed":
+                await self._handle_evt_input_audio_buffer_committed(evt)
+            elif evt.type == "response.output_text.delta":
+                await self._handle_evt_text_delta(evt)
+            elif evt.type == "response.output_audio_transcript.delta":
+                await self._handle_evt_audio_transcript_delta(evt)
+            elif evt.type == "response.function_call_arguments.done":
+                await self._handle_evt_function_call_arguments_done(evt)
+            elif evt.type == "error":
+                if not await self._maybe_handle_evt_retrieve_conversation_item_error(evt):
+                    handled = await self._handle_evt_error(evt)
+                    if not handled:
+                        return
         await self._handle_ws_close()

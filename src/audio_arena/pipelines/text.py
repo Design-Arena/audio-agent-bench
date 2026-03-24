@@ -74,21 +74,24 @@ class TextPipeline(BasePipeline):
     def _setup_context(self) -> None:
         """Create LLMContext with system prompt, tools, and first user message.
 
-        In rehydration mode, golden conversation history (user/assistant pairs)
-        is inserted between the system prompt and the target turn's user message.
+        In rehydration mode, golden conversation history is appended to the
+        system prompt so prior tool calls and tool results remain visible.
         """
         system_instruction = getattr(self.benchmark, "system_instruction", "")
 
-        messages = [{"role": "system", "content": system_instruction}]
-
-        # In rehydration mode, inject golden history as user/assistant pairs
+        # In rehydration mode, the shared history string preserves prior
+        # user/tool/tool-result/assistant chronology. Injecting only the
+        # user/assistant message pairs would silently drop the tool state.
         if self._rehydration_turns:
-            history_messages, _ = self.build_rehydration_history(self._rehydration_turns)
-            messages.extend(history_messages)
+            _, instruction_suffix = self.build_rehydration_history(self._rehydration_turns)
+            system_instruction = system_instruction + instruction_suffix
             logger.info(
-                f"[Rehydration] Injected {len(self._rehydration_turns)} golden turns "
-                f"({len(history_messages)} messages) into LLMContext"
+                f"[Rehydration] Enriched text system prompt with "
+                f"{len(self._rehydration_turns)} golden turns "
+                f"({len(system_instruction)} chars total)"
             )
+
+        messages = [{"role": "system", "content": system_instruction}]
 
         # Append the target turn's user message
         first_turn = self._get_current_turn()
