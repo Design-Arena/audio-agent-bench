@@ -1796,7 +1796,6 @@ class NovaSonicPipeline:
             accumulated_text = self.turn_gate._response_text or ""
             self._was_responding_at_disconnect = (
                 self.turn_gate._response_active
-                or self.turn_gate._waiting_for_response
                 or len(accumulated_text) > 0
             )
             self._interrupted_turn_text = accumulated_text

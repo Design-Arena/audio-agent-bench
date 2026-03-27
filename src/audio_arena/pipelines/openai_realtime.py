@@ -381,43 +381,46 @@ class OpenAIRealtimeLLMServiceExplicitToolResult(ReconnectOnDisconnectMixin, Ope
 
     async def _receive_task_handler(self):
         """Extend the base receive loop with input_audio_buffer.committed handling."""
-        async for message in self._websocket:
-            evt = rt_events.parse_server_event(message)
-            if evt.type == "session.created":
-                await self._handle_evt_session_created(evt)
-            elif evt.type == "session.updated":
-                await self._handle_evt_session_updated(evt)
-            elif evt.type == "response.output_audio.delta":
-                await self._handle_evt_audio_delta(evt)
-            elif evt.type == "response.output_audio.done":
-                await self._handle_evt_audio_done(evt)
-            elif evt.type == "conversation.item.added":
-                await self._handle_evt_conversation_item_added(evt)
-            elif evt.type == "conversation.item.done":
-                await self._handle_evt_conversation_item_done(evt)
-            elif evt.type == "conversation.item.input_audio_transcription.delta":
-                await self._handle_evt_input_audio_transcription_delta(evt)
-            elif evt.type == "conversation.item.input_audio_transcription.completed":
-                await self.handle_evt_input_audio_transcription_completed(evt)
-            elif evt.type == "conversation.item.retrieved":
-                await self._handle_conversation_item_retrieved(evt)
-            elif evt.type == "response.done":
-                await self._handle_evt_response_done(evt)
-            elif evt.type == "input_audio_buffer.speech_started":
-                await self._handle_evt_speech_started(evt)
-            elif evt.type == "input_audio_buffer.speech_stopped":
-                await self._handle_evt_speech_stopped(evt)
-            elif evt.type == "input_audio_buffer.committed":
-                await self._handle_evt_input_audio_buffer_committed(evt)
-            elif evt.type == "response.output_text.delta":
-                await self._handle_evt_text_delta(evt)
-            elif evt.type == "response.output_audio_transcript.delta":
-                await self._handle_evt_audio_transcript_delta(evt)
-            elif evt.type == "response.function_call_arguments.done":
-                await self._handle_evt_function_call_arguments_done(evt)
-            elif evt.type == "error":
-                if not await self._maybe_handle_evt_retrieve_conversation_item_error(evt):
-                    handled = await self._handle_evt_error(evt)
-                    if not handled:
-                        return
+        try:
+            async for message in self._websocket:
+                evt = rt_events.parse_server_event(message)
+                if evt.type == "session.created":
+                    await self._handle_evt_session_created(evt)
+                elif evt.type == "session.updated":
+                    await self._handle_evt_session_updated(evt)
+                elif evt.type == "response.output_audio.delta":
+                    await self._handle_evt_audio_delta(evt)
+                elif evt.type == "response.output_audio.done":
+                    await self._handle_evt_audio_done(evt)
+                elif evt.type == "conversation.item.added":
+                    await self._handle_evt_conversation_item_added(evt)
+                elif evt.type == "conversation.item.done":
+                    await self._handle_evt_conversation_item_done(evt)
+                elif evt.type == "conversation.item.input_audio_transcription.delta":
+                    await self._handle_evt_input_audio_transcription_delta(evt)
+                elif evt.type == "conversation.item.input_audio_transcription.completed":
+                    await self.handle_evt_input_audio_transcription_completed(evt)
+                elif evt.type == "conversation.item.retrieved":
+                    await self._handle_conversation_item_retrieved(evt)
+                elif evt.type == "response.done":
+                    await self._handle_evt_response_done(evt)
+                elif evt.type == "input_audio_buffer.speech_started":
+                    await self._handle_evt_speech_started(evt)
+                elif evt.type == "input_audio_buffer.speech_stopped":
+                    await self._handle_evt_speech_stopped(evt)
+                elif evt.type == "input_audio_buffer.committed":
+                    await self._handle_evt_input_audio_buffer_committed(evt)
+                elif evt.type == "response.output_text.delta":
+                    await self._handle_evt_text_delta(evt)
+                elif evt.type == "response.output_audio_transcript.delta":
+                    await self._handle_evt_audio_transcript_delta(evt)
+                elif evt.type == "response.function_call_arguments.done":
+                    await self._handle_evt_function_call_arguments_done(evt)
+                elif evt.type == "error":
+                    if not await self._maybe_handle_evt_retrieve_conversation_item_error(evt):
+                        handled = await self._handle_evt_error(evt)
+                        if not handled:
+                            return
+        except Exception as e:
+            logger.warning(f"WebSocket receive loop ended with exception: {e}")
         await self._handle_ws_close()

@@ -176,132 +176,135 @@ class XAIRealtimeLLMService(ReconnectOnDisconnectMixin, OpenAIRealtimeLLMService
 
     async def _receive_task_handler(self):
         """Override to handle xAI-specific events like ping."""
-        async for message in self._websocket:
-            try:
-                raw_event = json.loads(message)
-                event_type = raw_event.get("type")
+        try:
+            async for message in self._websocket:
+                try:
+                    raw_event = json.loads(message)
+                    event_type = raw_event.get("type")
 
-                logger.info(f"[xAI] Received event: {event_type}")
+                    logger.info(f"[xAI] Received event: {event_type}")
 
-                # Handle xAI-specific events
-                if event_type == "ping":
-                    logger.debug("Received xAI ping event, ignoring")
-                    continue
-
-                if event_type == "conversation.created":
-                    logger.info("[xAI] Conversation created, treating as session ready")
-                    await self._update_settings()
-                    continue
-
-                if event_type == "session.updated":
-                    # xAI returns non-standard values like tool_choice="not implemented"
-                    session_data = raw_event.get("session", {})
-                    tools_in_response = session_data.get("tools", [])
-                    logger.debug(f"[xAI] session.updated - tools count: {len(tools_in_response)}")
-
-                    # Handle without pydantic validation
-                    logger.info("[xAI] Session updated")
-                    self._api_session_ready = True
-                    if self._run_llm_when_api_session_ready:
-                        self._run_llm_when_api_session_ready = False
-                        await self._create_response()
-                    continue
-
-                if event_type == "response.created":
-                    # xAI sends empty usage object {} which fails pydantic validation
-                    logger.info("[xAI] Response created")
-                    continue
-
-                if event_type == "input_audio_buffer.committed":
-                    logger.debug("[xAI] Audio buffer committed")
-                    continue
-
-                # xAI sends these events with different formats that fail pydantic validation
-                # Handle them minimally to avoid error spam in logs
-                if event_type == "response.content_part.added":
-                    logger.debug("[xAI] Content part added")
-                    continue
-
-                if event_type == "response.content_part.done":
-                    logger.debug("[xAI] Content part done")
-                    continue
-
-                if event_type == "response.output_item.added":
-                    logger.debug("[xAI] Output item added")
-                    continue
-
-                if event_type == "response.output_item.done":
-                    logger.debug("[xAI] Output item done")
-                    continue
-
-                if event_type == "response.function_call_arguments.delta":
-                    # xAI sends function call args progressively but format differs
-                    logger.debug("[xAI] Function call arguments delta")
-                    continue
-
-                if event_type == "response.function_call_arguments.done":
-                    # xAI format differs from OpenAI, handle in response.done instead
-                    logger.debug("[xAI] Function call arguments done")
-                    continue
-
-                # Handle conversation.item.added for tool-related items that fail pydantic
-                if event_type == "conversation.item.added":
-                    item = raw_event.get("item", {})
-                    item_role = item.get("role")
-                    item_type = item.get("type")
-                    # Skip validation for tool-related items (function_call, function_call_output)
-                    if item_role == "tool" or item_type in ("function_call", "function_call_output"):
-                        logger.debug(f"[xAI] Conversation item added (type={item_type}, role={item_role})")
+                    # Handle xAI-specific events
+                    if event_type == "ping":
+                        logger.debug("Received xAI ping event, ignoring")
                         continue
-                    # For user/assistant items, fall through to standard parser
 
-                if event_type == "response.done":
-                    # xAI includes function calls in response.done output
-                    await self._handle_xai_response_done(raw_event)
-                    await self.push_frame(LLMFullResponseEndFrame())
-                    self._current_assistant_response = None
-                    continue
+                    if event_type == "conversation.created":
+                        logger.info("[xAI] Conversation created, treating as session ready")
+                        await self._update_settings()
+                        continue
 
-                # Use standard parser for other events
-                evt = rt_events.parse_server_event(message)
-                if evt.type == "session.created":
-                    await self._handle_evt_session_created(evt)
-                elif evt.type == "session.updated":
-                    await self._handle_evt_session_updated(evt)
-                elif evt.type == "response.output_audio.delta":
-                    await self._handle_evt_audio_delta(evt)
-                elif evt.type == "response.output_audio.done":
-                    await self._handle_evt_audio_done(evt)
-                elif evt.type == "conversation.item.added":
-                    await self._handle_evt_conversation_item_added(evt)
-                elif evt.type == "conversation.item.done":
-                    await self._handle_evt_conversation_item_done(evt)
-                elif evt.type == "conversation.item.input_audio_transcription.delta":
-                    await self._handle_evt_input_audio_transcription_delta(evt)
-                elif evt.type == "conversation.item.input_audio_transcription.completed":
-                    await self.handle_evt_input_audio_transcription_completed(evt)
-                elif evt.type == "conversation.item.retrieved":
-                    await self._handle_conversation_item_retrieved(evt)
-                elif evt.type == "response.done":
-                    await self._handle_evt_response_done(evt)
-                elif evt.type == "input_audio_buffer.speech_started":
-                    await self._handle_evt_speech_started(evt)
-                elif evt.type == "input_audio_buffer.speech_stopped":
-                    await self._handle_evt_speech_stopped(evt)
-                elif evt.type == "response.output_text.delta":
-                    await self._handle_evt_text_delta(evt)
-                elif evt.type == "response.output_audio_transcript.delta":
-                    await self._handle_evt_audio_transcript_delta(evt)
-                elif evt.type == "response.function_call_arguments.done":
-                    await self._handle_evt_function_call_arguments_done(evt)
-                elif evt.type == "error":
-                    if not await self._maybe_handle_evt_retrieve_conversation_item_error(evt):
-                        await self._handle_evt_error(evt)
-                        return
-                else:
-                    logger.debug(f"Ignoring unhandled event type: {evt.type}")
-            except Exception as e:
-                logger.warning(f"Error processing xAI event: {e}")
+                    if event_type == "session.updated":
+                        # xAI returns non-standard values like tool_choice="not implemented"
+                        session_data = raw_event.get("session", {})
+                        tools_in_response = session_data.get("tools", [])
+                        logger.debug(f"[xAI] session.updated - tools count: {len(tools_in_response)}")
+
+                        # Handle without pydantic validation
+                        logger.info("[xAI] Session updated")
+                        self._api_session_ready = True
+                        if self._run_llm_when_api_session_ready:
+                            self._run_llm_when_api_session_ready = False
+                            await self._create_response()
+                        continue
+
+                    if event_type == "response.created":
+                        # xAI sends empty usage object {} which fails pydantic validation
+                        logger.info("[xAI] Response created")
+                        continue
+
+                    if event_type == "input_audio_buffer.committed":
+                        logger.debug("[xAI] Audio buffer committed")
+                        continue
+
+                    # xAI sends these events with different formats that fail pydantic validation
+                    # Handle them minimally to avoid error spam in logs
+                    if event_type == "response.content_part.added":
+                        logger.debug("[xAI] Content part added")
+                        continue
+
+                    if event_type == "response.content_part.done":
+                        logger.debug("[xAI] Content part done")
+                        continue
+
+                    if event_type == "response.output_item.added":
+                        logger.debug("[xAI] Output item added")
+                        continue
+
+                    if event_type == "response.output_item.done":
+                        logger.debug("[xAI] Output item done")
+                        continue
+
+                    if event_type == "response.function_call_arguments.delta":
+                        # xAI sends function call args progressively but format differs
+                        logger.debug("[xAI] Function call arguments delta")
+                        continue
+
+                    if event_type == "response.function_call_arguments.done":
+                        # xAI format differs from OpenAI, handle in response.done instead
+                        logger.debug("[xAI] Function call arguments done")
+                        continue
+
+                    # Handle conversation.item.added for tool-related items that fail pydantic
+                    if event_type == "conversation.item.added":
+                        item = raw_event.get("item", {})
+                        item_role = item.get("role")
+                        item_type = item.get("type")
+                        # Skip validation for tool-related items (function_call, function_call_output)
+                        if item_role == "tool" or item_type in ("function_call", "function_call_output"):
+                            logger.debug(f"[xAI] Conversation item added (type={item_type}, role={item_role})")
+                            continue
+                        # For user/assistant items, fall through to standard parser
+
+                    if event_type == "response.done":
+                        # xAI includes function calls in response.done output
+                        await self._handle_xai_response_done(raw_event)
+                        await self.push_frame(LLMFullResponseEndFrame())
+                        self._current_assistant_response = None
+                        continue
+
+                    # Use standard parser for other events
+                    evt = rt_events.parse_server_event(message)
+                    if evt.type == "session.created":
+                        await self._handle_evt_session_created(evt)
+                    elif evt.type == "session.updated":
+                        await self._handle_evt_session_updated(evt)
+                    elif evt.type == "response.output_audio.delta":
+                        await self._handle_evt_audio_delta(evt)
+                    elif evt.type == "response.output_audio.done":
+                        await self._handle_evt_audio_done(evt)
+                    elif evt.type == "conversation.item.added":
+                        await self._handle_evt_conversation_item_added(evt)
+                    elif evt.type == "conversation.item.done":
+                        await self._handle_evt_conversation_item_done(evt)
+                    elif evt.type == "conversation.item.input_audio_transcription.delta":
+                        await self._handle_evt_input_audio_transcription_delta(evt)
+                    elif evt.type == "conversation.item.input_audio_transcription.completed":
+                        await self.handle_evt_input_audio_transcription_completed(evt)
+                    elif evt.type == "conversation.item.retrieved":
+                        await self._handle_conversation_item_retrieved(evt)
+                    elif evt.type == "response.done":
+                        await self._handle_evt_response_done(evt)
+                    elif evt.type == "input_audio_buffer.speech_started":
+                        await self._handle_evt_speech_started(evt)
+                    elif evt.type == "input_audio_buffer.speech_stopped":
+                        await self._handle_evt_speech_stopped(evt)
+                    elif evt.type == "response.output_text.delta":
+                        await self._handle_evt_text_delta(evt)
+                    elif evt.type == "response.output_audio_transcript.delta":
+                        await self._handle_evt_audio_transcript_delta(evt)
+                    elif evt.type == "response.function_call_arguments.done":
+                        await self._handle_evt_function_call_arguments_done(evt)
+                    elif evt.type == "error":
+                        if not await self._maybe_handle_evt_retrieve_conversation_item_error(evt):
+                            await self._handle_evt_error(evt)
+                            return
+                    else:
+                        logger.debug(f"Ignoring unhandled event type: {evt.type}")
+                except Exception as e:
+                    logger.warning(f"Error processing xAI event: {e}")
+        except Exception as e:
+            logger.warning(f"WebSocket receive loop ended with exception: {e}")
 
         # WebSocket loop ended — check if we should reconnect
         await self._handle_ws_close()
