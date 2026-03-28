@@ -216,10 +216,7 @@ turns = [
                             'args': {'appointment_id': 'APT-001',
                                      'field': 'time',
                                      'new_value': '10:30'}},
- 'function_call_response': [
-     {'status': 'success'},
-     {'status': 'success'},
- ],
+ 'function_call_response': {'status': 'success'},
  'categories': ['tool_use', 'long_range_memory', 'implicit_correction'],
  'audio_file': 'audio/turn_013.wav'},
 

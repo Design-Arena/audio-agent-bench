@@ -679,8 +679,7 @@ turns = [
 {'input': "That's perfect. Thanks so much!",
  'golden_text': "Your order ORD-5521 is confirmed! Delivery to 3840 "
                 "Willow Lane, Pasadena. Your total is one hundred eight "
-                "seventy-two. You'll receive a confirmation at "
-                "818-940-3670. Thank you for shopping with Harvest & "
+                "seventy-two. Thank you for shopping with Harvest & "
                 "Hearth Market, Carmen. Have a great day!",
  'required_function_call': {'name': 'end_session', 'args': {}},
  'function_call_response': None,

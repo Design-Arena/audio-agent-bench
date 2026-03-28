@@ -110,11 +110,11 @@ turns = [
           "end of week? Main topics should be Q4 results and the new "
           "product roadmap. Thanks, Dana.' Send that.",
  'golden_text': "Email sent to Alex Reed at alex.reed@meridian.com with "
-                "the subject 'Meeting Agenda' and the body you "
+                "the subject 'NYC Meeting Agenda' and the body you "
                 "dictated. Done!",
  'required_function_call': {'name': 'send_email',
                             'args': {'to': 'alex.reed@meridian.com',
-                                     'subject': 'Meeting Agenda',
+                                     'subject': 'NYC Meeting Agenda',
                                      'body': 'Hi Alex, I\'ll be in New York on February 3rd for our meeting. Can you put together the agenda and share it by end of week? Main topics should be Q4 results and the new product roadmap. Thanks, Dana.'}},
  'flexible_args': ['subject', 'body'],
  'function_call_response': {'status': 'success',

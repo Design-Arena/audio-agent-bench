@@ -487,8 +487,7 @@ turns = [
 # Turn 30 — Final goodbye + end session
 {'input': "Sounds good. Let's go ahead and place the order. Thanks "
           "for all the help!",
- 'golden_text': "Order placed! You'll receive a confirmation at "
-                "201-473-1565. With next-day shipping, the ProBook "
+ 'golden_text': "You're all set! With next-day shipping, the ProBook "
                 "X1940 should arrive tomorrow if ordered before 2 PM "
                 "Eastern. Your daughter's going to love it for her CS "
                 "and video editing work. Have a great day!",
