@@ -475,6 +475,180 @@ class GeminiLiveLLMServiceWithReconnection(GeminiLiveLLMService):
                 logger.warning(f"Error in on_reconnected callback: {e}")
 
 
+class Gemini31LiveLLMService(GeminiLiveLLMServiceWithReconnection):
+    """Gemini 3.1 Live compatible service.
+
+    Gemini 3.1 changed the Live API contract: send_client_content is only
+    allowed for initial history seeding (with history_config). All other
+    text input must go through send_realtime_input(text=...).
+
+    This subclass overrides the three methods that use send_client_content:
+    - _create_initial_response: sends greeting text via send_realtime_input
+    - _create_single_response: sends conversation text via send_realtime_input
+    - _handle_user_stopped_speaking: skips the turn_complete signal (3.1's
+      built-in VAD handles turn detection for audio input)
+    """
+
+    async def _create_initial_response(self):
+        """Send initial context text via send_realtime_input instead of send_client_content."""
+        if self._disconnecting:
+            return
+
+        if not self._session:
+            self._run_llm_when_session_ready = True
+            return
+
+        adapter = self.get_llm_adapter()
+        messages = adapter.get_llm_invocation_params(self._context).get("messages", [])
+        if not messages:
+            return
+
+        text_parts = []
+        for msg in messages:
+            if hasattr(msg, "parts"):
+                for part in msg.parts:
+                    if hasattr(part, "text") and part.text:
+                        text_parts.append(part.text)
+
+        if not text_parts:
+            return
+
+        combined_text = " ".join(text_parts)
+        logger.info(f"[Gemini31] Sending initial text via send_realtime_input: {combined_text[:80]}")
+
+        await self.start_ttfb_metrics()
+
+        try:
+            await self._session.send_realtime_input(text=combined_text)
+        except Exception as e:
+            await self._handle_send_error(e)
+
+        if not self._inference_on_context_initialization:
+            self._needs_turn_complete_message = True
+
+    async def _create_single_response(self, messages_list):
+        """Send conversation text via send_realtime_input instead of send_client_content."""
+        if self._disconnecting or not self._session:
+            return
+
+        context = LLMContext(messages=messages_list)
+        adapter = self.get_llm_adapter()
+        messages = adapter.get_llm_invocation_params(context).get("messages", [])
+
+        if not messages:
+            return
+
+        text_parts = []
+        for msg in messages:
+            if hasattr(msg, "parts"):
+                for part in msg.parts:
+                    if hasattr(part, "text") and part.text:
+                        text_parts.append(part.text)
+
+        if not text_parts:
+            return
+
+        combined_text = " ".join(text_parts)
+        logger.info(f"[Gemini31] Sending text via send_realtime_input: {combined_text[:80]}")
+
+        await self.start_ttfb_metrics()
+
+        try:
+            await self._session.send_realtime_input(text=combined_text)
+        except Exception as e:
+            await self._handle_send_error(e)
+
+    async def _connection_task_handler(self, config):
+        """Override to process ALL parts of each server message.
+
+        Gemini 3.1 can bundle model_turn + turn_complete + transcription
+        into a single message.  The base class uses if-elif which only
+        handles the first matching part.  This override uses non-exclusive
+        if statements so every part is processed.
+        """
+        import time as _time
+        from pipecat.services.google.gemini_live.llm import CONNECTION_ESTABLISHED_THRESHOLD
+
+        async with self._client.aio.live.connect(model=self._model_name, config=config) as session:
+            logger.info("Connected to Gemini service")
+            self._connection_start_time = _time.time()
+            await self._handle_session_ready(session)
+
+            while True:
+                try:
+                    turn = self._session.receive()
+                    async for message in turn:
+                        self._check_and_reset_failure_counter()
+
+                        sc = message.server_content
+                        if sc and sc.interrupted:
+                            logger.debug("[Gemini31] interrupted signal received")
+                            await self.push_interruption_task_frame_and_wait()
+                            continue
+
+                        if sc and sc.model_turn:
+                            await self._handle_msg_model_turn(message)
+
+                        if sc and sc.input_transcription:
+                            await self._handle_msg_input_transcription(message)
+
+                        if sc and sc.output_transcription:
+                            await self._handle_msg_output_transcription(message)
+
+                        if sc and sc.grounding_metadata:
+                            await self._handle_msg_grounding_metadata(message)
+
+                        if sc and sc.turn_complete:
+                            if message.usage_metadata:
+                                await self._handle_msg_turn_complete(message)
+                                await self._handle_msg_usage_metadata(message)
+                            else:
+                                await self._handle_msg_turn_complete(message)
+
+                        if message.tool_call:
+                            await self._handle_msg_tool_call(message)
+
+                        if message.session_resumption_update:
+                            self._handle_msg_resumption_update(message)
+
+                except Exception as e:
+                    if not self._disconnecting:
+                        should_reconnect = await self._handle_connection_error(e)
+                        if should_reconnect:
+                            await self._reconnect()
+                            return
+                    break
+
+    async def _handle_user_started_speaking(self, frame):
+        """Resume audio input when the user starts speaking."""
+        self._user_is_speaking = True
+        self._audio_input_paused = False
+        logger.debug("[Gemini31] Resumed audio input (user speaking)")
+
+    async def _handle_user_stopped_speaking(self, frame):
+        """Signal end of user speech to Gemini 3.1 via audio_stream_end.
+
+        Pipecat sends a continuous audio stream.  In 3.1, the base class's
+        send_client_content(turn_complete=True) is rejected (1007).  Instead
+        we send audio_stream_end which flushes the server's audio buffer and
+        triggers the model to respond.  We also pause audio input to prevent
+        subsequent silence frames from re-opening the stream before the model
+        has a chance to respond.
+        """
+        self._user_is_speaking = False
+        self._user_audio_buffer = bytearray()
+        await self.start_ttfb_metrics()
+        self._needs_turn_complete_message = False
+        if self._session and not self._disconnecting:
+            try:
+                await self._session.send_realtime_input(audio_stream_end=True)
+                logger.debug("[Gemini31] Sent audio_stream_end")
+            except Exception as e:
+                logger.warning(f"[Gemini31] Error sending audio_stream_end: {e}")
+        self._audio_input_paused = True
+        logger.debug("[Gemini31] Paused audio input (waiting for model response)")
+
+
 class LLMFrameLogger(FrameProcessor):
     """Logs every frame emitted by the LLM stage and captures TTFB metrics."""
 
@@ -901,7 +1075,13 @@ class RealtimePipeline(BasePipeline):
             if not api_key:
                 raise EnvironmentError("GOOGLE_API_KEY environment variable is required")
 
-            return GeminiLiveLLMServiceWithReconnection(
+            # Gemini 3.1+ uses send_realtime_input instead of send_client_content
+            is_gemini_31 = "gemini-3" in model.lower()
+            service_cls = Gemini31LiveLLMService if is_gemini_31 else GeminiLiveLLMServiceWithReconnection
+            if is_gemini_31:
+                logger.info(f"Using Gemini31LiveLLMService for model {model}")
+
+            kwargs = dict(
                 api_key=api_key,
                 model=model,
                 system_instruction=system_instruction,
@@ -910,6 +1090,8 @@ class RealtimePipeline(BasePipeline):
                 on_reconnecting=self._on_gemini_reconnecting,
                 on_reconnected=self._on_gemini_reconnected,
             )
+
+            return service_cls(**kwargs)
         else:
             # For other services, use base class implementation
             return super()._create_llm(service_class, model)
