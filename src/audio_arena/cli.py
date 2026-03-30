@@ -50,8 +50,11 @@ SERVICE_ALIASES = {
 MODEL_ALIASES: dict[str, tuple[str, Optional[str], Optional[str]]] = {
     "gpt-realtime":      ("gpt-realtime",                     "openai-realtime",   None),
     "gemini-native-audio": ("gemini-2.5-flash-native-audio-preview-12-2025", "gemini-live", None),
+    "gemini-3.1-flash":  ("gemini-3.1-flash-live-preview",    "gemini-live",       None),
     "ultravox":          ("ultravox-v0.7",                     "ultravox-realtime", None),
     "grok-realtime":     ("grok-realtime",                     None,               None),
+    "glm-realtime-flash": ("glm-realtime-flash",               None,               "glm-realtime"),
+    "glm-realtime-air":  ("glm-realtime-air",                  None,               "glm-realtime"),
     "nova-sonic":        ("amazon.nova-2-sonic-v1:0",          None,               "nova-sonic"),
 }
 
@@ -64,6 +67,7 @@ PIPELINE_CLASSES = {
     "text": "audio_arena.pipelines.text.TextPipeline",
     "realtime": "audio_arena.pipelines.realtime.RealtimePipeline",
     "grok-realtime": "audio_arena.pipelines.grok_realtime.GrokRealtimePipeline",
+    "glm-realtime": "audio_arena.pipelines.glm_realtime.GLMRealtimePipeline",
     "nova-sonic": "audio_arena.pipelines.nova_sonic.NovaSonicPipeline",
 }
 
@@ -172,6 +176,9 @@ def infer_pipeline(model: str) -> str:
     # Grok realtime uses dedicated pipeline for xAI-specific protocol handling
     if m.startswith("grok") and "realtime" in m:
         return "grok-realtime"
+    # GLM realtime uses dedicated pipeline for Zhipu-specific protocol handling
+    if m.startswith("glm") and "realtime" in m:
+        return "glm-realtime"
     if "realtime" in m:
         return "realtime"
     if "native-audio" in m or "live" in m:
