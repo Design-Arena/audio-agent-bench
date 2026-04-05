@@ -81,6 +81,9 @@ export GOOGLE_API_KEY=...             # Google (Gemini text and Gemini Live)
 export ULTRAVOX_API_KEY=...           # Ultravox
 export XAI_API_KEY=...                # xAI (Grok Realtime)
 
+# Zhipu AI (GLM Realtime)
+export ZHIPU_API_KEY=...
+
 # AWS Nova models (text and speech-to-speech)
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
@@ -113,6 +116,10 @@ uv run audio-arena run conversation_bench --model amazon.nova-2-sonic-v1:0 --pip
 
 # Grok (xAI) Realtime
 uv run audio-arena run conversation_bench --model grok-realtime
+
+# GLM Realtime (Zhipu AI)
+uv run audio-arena run conversation_bench --model glm-realtime-flash
+uv run audio-arena run appointment_bench --model glm-realtime-air
 
 # Debug with limited turns
 uv run audio-arena run appointment_bench --model gpt-4o --service openai --only-turns 0,1,2
@@ -272,6 +279,7 @@ uv run audio-arena run conversation_bench \
 | `text` | Synchronous text LLMs | Default for all models |
 | `realtime` | OpenAI Realtime, Gemini Live, Ultravox | `*realtime*`, `*native-audio*`, `*live*`, `*ultravox*` |
 | `grok-realtime` | xAI Grok Realtime | `grok*realtime*` |
+| `glm-realtime` | Zhipu AI GLM Realtime | `glm*realtime*` |
 | `nova-sonic` | AWS Nova Sonic | `*nova-sonic*`, `*nova_sonic*` |
 
 ## Output Structure
@@ -302,6 +310,7 @@ audio-arena/
 │   │   ├── realtime.py            # Shared realtime pipeline orchestration
 │   │   ├── openai_realtime.py     # OpenAI Realtime explicit-tool-result service
 │   │   ├── grok_realtime.py       # Grok Realtime pipeline
+│   │   ├── glm_realtime.py        # Zhipu AI GLM Realtime pipeline
 │   │   └── nova_sonic.py          # Nova Sonic pipeline
 │   ├── processors/                # Frame processors
 │   ├── transports/                # Input/output transports
