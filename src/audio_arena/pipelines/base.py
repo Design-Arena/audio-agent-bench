@@ -529,14 +529,14 @@ class BasePipeline(ABC):
         custom_response = current_turn.get("function_call_response")
         required_calls = current_turn.get("required_function_call")
         if required_calls is None:
-            return self._build_tool_error(
-                function_name=function_name,
-                arguments=arguments,
-                error_code="UNEXPECTED_TOOL_CALL",
-                message="No tool call is expected on this turn.",
-                expected_function=None,
-                expected_args=None,
-            )
+            return {
+                "status": "not_available",
+                "message": (
+                    "This function is not available right now. "
+                    "Do NOT call any more functions. "
+                    "Respond directly to the user with speech."
+                ),
+            }
 
         if isinstance(required_calls, dict):
             expected_name = required_calls.get("name")
