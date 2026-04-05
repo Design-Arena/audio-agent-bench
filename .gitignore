@@ -34,6 +34,22 @@ benchmarks/setup_bench/
 benchmarks/travel_bench/
 benchmarks/wifi_bench/
 
+# Evaluation analysis artifacts
+*_evaluation*.json
+*_evaluation*.md
+*_evaluation*.csv
+*_REPORT*.md
+*_analysis*.md
+ANALYSIS_*.md
+ANALYSIS_*.txt
+*_CORRECTED*.json
+*_CORRECTED*.md
+FUNCTION_CALL_SCORING_GUIDE.md
+QUICK_REFERENCE_PATTERNS.md
+README_EVALUATION.md
+user_reported_issues_verification.md
+evaluate_conversation_bench.py
+
 # Claude config
 .claude-home/
 

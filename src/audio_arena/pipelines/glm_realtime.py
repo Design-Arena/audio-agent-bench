@@ -192,11 +192,20 @@ class GLMRealtimeLLMService(ReconnectOnDisconnectMixin, OpenAIRealtimeLLMService
         GLM has a 10 MB server-side audio buffer limit. Without clearing
         between turns, residual audio from prior turns accumulates and
         eventually triggers ``audio_buffer_size_exceeded``.
+
+        Guarded: if a response is already pending (we committed audio and
+        are waiting for GLM to reply), ignore spurious start events from
+        Pipecat's transcription-based turn strategy.  Without this guard,
+        the TranscriptionUserTurnStartStrategy fires between the VAD-based
+        stop and the transcription-based stop, clearing the just-committed
+        buffer and resetting the pending flag — which allows a second
+        commit of an empty/stale buffer and doubles the response latency.
         """
+        if self._glm_response_pending:
+            logger.debug("[GLM] Ignoring user-started-speaking while response is pending")
+            return
         await self._ws_send({"type": "input_audio_buffer.clear"})
         logger.debug("[GLM] Cleared server audio buffer for new turn")
-        # Reset response guard so this turn can commit
-        self._glm_response_pending = False
         await super()._handle_user_started_speaking(frame)
 
     async def _handle_user_stopped_speaking(self, frame):
@@ -346,14 +355,21 @@ class GLMRealtimeLLMService(ReconnectOnDisconnectMixin, OpenAIRealtimeLLMService
             logger.info("[GLM] Sent response.create to continue after tool result(s)")
 
     async def _reconnect_on_disconnect(self):
-        """Reset per-session state before reconnecting.
+        """Reset all per-session state before reconnecting.
 
-        ``_glm_initial_session_configured`` must be cleared so that
-        ``_update_settings`` fires on the fresh session — otherwise the
-        new WebSocket never receives ``session.update`` with the (possibly
-        enriched) system instruction and tools.
+        Without this, stale flags from the old session break the new one:
+        - ``_glm_initial_session_configured``: must be False so
+          ``_update_settings`` sends ``session.update`` to the fresh session.
+        - ``_glm_response_pending``: must be False so the next turn's
+          ``_handle_user_stopped_speaking`` actually commits audio and
+          sends ``response.create``.  Otherwise GLM never responds.
+        - ``_glm_waiting_for_committed``: stale True blocks response.create.
+        - ``_pending_glm_function_calls``: stale calls from the old session.
         """
         self._glm_initial_session_configured = False
+        self._glm_response_pending = False
+        self._glm_waiting_for_committed = False
+        self._pending_glm_function_calls.clear()
         await super()._reconnect_on_disconnect()
 
     async def _update_settings(self):
@@ -620,14 +636,14 @@ class GLMRealtimePipeline(RealtimePipeline):
     - GLM-specific session config (beta_fields, audio format)
     - Automatic reconnection with conversation history replay on disconnect
 
-    Context management (Nova-style):
-    - Proactive session rotation every ``GLM_PROACTIVE_ROTATION_TURNS`` turns
-      to avoid hitting the 8K token limit
+    Context management:
     - Reactive reconnection when "input validation error" (context overflow)
-      is received
-    - Budget-aware history injection: tool-call entries are prioritized, then
-      recent Q&A fills the remaining char budget
-    - Progressive fallback: tool-priority history → zero history
+      is received — the receive loop breaks and ``_handle_ws_close`` triggers
+      ``_reconnect_on_disconnect``
+    - Budget-aware history injection on reconnect: tool-call entries are
+      prioritized, then recent Q&A fills the remaining char budget
+    - Falls back to zero history when the system instruction already fills
+      the char budget
     """
 
     requires_service = False
@@ -636,14 +652,8 @@ class GLMRealtimePipeline(RealtimePipeline):
     # Prompts exceeding this are positionally truncated.
     GLM_MAX_INSTRUCTION_CHARS = 12000  # ~3K tokens
 
-    GLM_PROACTIVE_ROTATION_TURNS = 8
     GLM_MAX_SINGLE_ENTRY_CHARS = 500
     GLM_HISTORY_HEADER_CHARS = 200
-
-    def __init__(self, benchmark):
-        super().__init__(benchmark)
-        self._glm_turns_since_rotation = 0
-        self._glm_is_rotating = False
 
     # ------------------------------------------------------------------
     # LLM creation
@@ -691,6 +701,10 @@ class GLMRealtimePipeline(RealtimePipeline):
             tools=tools,
             audio=audio_config,
         )
+
+        if "air" in model.lower():
+            self._turn_watchdog_timeout = 90.0
+            logger.info(f"[GLM] Air model detected — watchdog timeout set to {self._turn_watchdog_timeout}s")
 
         return GLMRealtimeLLMService(
             api_key=api_key,
@@ -821,69 +835,18 @@ class GLMRealtimePipeline(RealtimePipeline):
         return block
 
     # ------------------------------------------------------------------
-    # Proactive session rotation
+    # Turn lifecycle
     # ------------------------------------------------------------------
 
-    def _should_proactive_rotate(self) -> bool:
-        """Check if we should proactively rotate the GLM session."""
-        if self._glm_is_rotating:
-            return False
-        return self._glm_turns_since_rotation >= self.GLM_PROACTIVE_ROTATION_TURNS
-
-    async def _queue_next_turn(self) -> None:
-        """Override to insert proactive rotation before queueing the next turn.
-
-        After ``GLM_PROACTIVE_ROTATION_TURNS`` turns, close the current
-        WebSocket session and reconnect with budgeted conversation history
-        injected into the system instruction.  This prevents the server-side
-        context from exceeding GLM's 8K token limit.
-        """
-        if self._should_proactive_rotate():
-            await self._proactive_glm_rotation()
-        await super()._queue_next_turn()
-
-    async def _proactive_glm_rotation(self):
-        """Proactively rotate GLM session at a clean turn boundary.
-
-        Closes the current WebSocket and reconnects with budgeted history.
-        Unlike reactive reconnection (triggered by overflow errors), this
-        happens between turns so we do NOT retry the current turn.
-
-        Uses progressive strategies: tool-priority history first, then
-        zero-context if that fails.
-        """
-        self._glm_is_rotating = True
-        logger.info(
-            f"[GLM] Proactive session rotation at turn {self.turn_idx} "
-            f"(turns since last rotation: {self._glm_turns_since_rotation})"
-        )
-
-        try:
-            await self.llm._reconnect_on_disconnect()
-        except Exception as e:
-            logger.warning(f"[GLM] Proactive rotation with history failed: {e}. Trying zero-context...")
-            self._force_zero_context_instructions()
-            try:
-                await self.llm._reconnect_on_disconnect()
-            except Exception as e2:
-                logger.error(f"[GLM] Zero-context rotation also failed: {e2}")
-                self._glm_is_rotating = False
-                raise
-
-        self.needs_turn_retry = False
-        self._glm_turns_since_rotation = 0
-        self._glm_is_rotating = False
-        logger.info("[GLM] Proactive session rotation complete")
-
-    def _force_zero_context_instructions(self):
-        """Reset instructions to original system prompt with no history."""
-        original = getattr(self.benchmark, "system_instruction", "")
-        if len(original) > self.GLM_MAX_INSTRUCTION_CHARS:
-            original = original[:self.GLM_MAX_INSTRUCTION_CHARS]
-        self.llm._session_properties.instructions = original
-        logger.warning("[GLM] Forced zero-context instructions for fallback rotation")
+    async def _retry_current_turn(self):
+        """Reset GLM per-turn flags before retry so the next commit goes through."""
+        self.llm._glm_response_pending = False
+        self.llm._glm_waiting_for_committed = False
+        await super()._retry_current_turn()
 
     async def _on_turn_end(self, assistant_text: str) -> None:
-        """Track turns since last rotation, then delegate to base."""
-        self._glm_turns_since_rotation += 1
+        """Reset per-turn LLM flags so the next turn can commit cleanly."""
+        self.llm._glm_response_pending = False
+        self.llm._glm_waiting_for_committed = False
         await super()._on_turn_end(assistant_text)
+

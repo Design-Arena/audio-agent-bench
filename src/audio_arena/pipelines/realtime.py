@@ -1300,6 +1300,14 @@ class RealtimePipeline(BasePipeline):
             logger.info("No turn retry needed")
             return
 
+        # Flush stale bot audio so old frames don't block the pipeline.
+        # Without this, NullAudioOutput paces leftover audio at real-time,
+        # causing backpressure that prevents the retry's response from
+        # advancing the turn.
+        if self.output_transport is not None:
+            self.output_transport._next_send_time = 0.0
+            logger.info("[RETRY] Flushed NullAudioOutput playback timing")
+
         logger.info(f"Waiting 2s before retrying turn {self.turn_idx} (attempt {self._turn_retry_count})")
         await asyncio.sleep(2.0)
 
