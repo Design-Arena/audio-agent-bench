@@ -1040,8 +1040,8 @@ def build_html(payload: dict) -> str:
         }},
         {{
           label: "Tool Use",
-          value: `${{payload.summary.passes.tool_use_correct}} / ${{payload.metadata.turn_count}}`,
-          note: "Exact or accepted partial tool correctness from the judge.",
+          value: `${{payload.summary.passes.tool_use_correct}} / ${{payload.summary.category_totals?.tool_use_correct ?? payload.metadata.turn_count}}`,
+          note: "Exact or accepted partial tool correctness from the judge, over applicable (required-tool) turns.",
         }},
         {{
           label: "Instruction Following",

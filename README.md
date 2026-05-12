@@ -160,11 +160,13 @@ The judge evaluates each turn on up to 5 dimensions:
 
 | Dimension | Scored on | Description |
 |-----------|-----------|-------------|
-| `tool_use_correct` | Every turn | Did the model call the expected function with correct arguments? |
+| `tool_use_correct` | Turns whose spec defines a `required_function_call` | Did the model call the expected function with correct arguments? |
 | `instruction_following` | Every turn | Did the model answer the question or advance the task? |
 | `kb_grounding` | Every turn | Is the response factually consistent with the knowledge base? |
 | `state_tracking` | Turns tagged with long-range memory, cancellation flow, or implicit correction | Does the model correctly track information from earlier turns? |
 | `ambiguity_handling` | Turns tagged with ambiguous entity or compound ambiguity | Does the model correctly disambiguate entities and constraints? |
+
+`tool_use_correct` reports `passes / applicable` where the denominator is the number of turns the benchmark expects a tool call on. Non-tool turns are marked not-applicable in `<judge>_judged.jsonl` and excluded from both numerator and denominator; spurious tool calls on non-tool turns are surfaced through `instruction_following` / `ambiguity_handling` per the penalty-absorption rules below.
 
 In plain language, these grader metrics mean:
 

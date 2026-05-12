@@ -1039,13 +1039,17 @@ def judge(
     else:
         suffix = f": {turn_taking_skip_reason}" if turn_taking_skip_reason else ""
         click.echo(f"\nJudged {total} turns (without turn-taking analysis{suffix})")
-    click.echo(f"  Tool use: {passes.get('tool_use_correct', 0)}/{total}")
+    category_totals = summary.get("category_totals", {})
+    tool_total = category_totals.get("tool_use_correct", total)
+    amb_total = category_totals.get("ambiguity_handling", 0)
+    state_total = category_totals.get("state_tracking", 0)
+    if tool_total:
+        click.echo(f"  Tool use: {passes.get('tool_use_correct', 0)}/{tool_total} (of {tool_total} applicable)")
+    else:
+        click.echo(f"  Tool use: N/A (no applicable turns)")
     click.echo(f"  Instruction following: {passes.get('instruction_following', 0)}/{total}")
     click.echo(f"  KB grounding: {passes.get('kb_grounding', 0)}/{total}")
 
-    category_totals = summary.get("category_totals", {})
-    amb_total = category_totals.get("ambiguity_handling", 0)
-    state_total = category_totals.get("state_tracking", 0)
     if amb_total:
         click.echo(f"  Ambiguity handling: {passes.get('ambiguity_handling', 0)}/{amb_total}")
     if state_total:

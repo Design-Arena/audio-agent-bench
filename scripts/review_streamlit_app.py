@@ -539,9 +539,12 @@ def render_single_run_view(payload: dict, error_analysis: str, source_path: str)
         "Grounding",
         str(payload["summary"]["passes"]["kb_grounding"]),
     )
+    tool_applicable = payload["summary"].get("category_totals", {}).get(
+        "tool_use_correct", payload["metadata"]["turn_count"]
+    )
     summary_columns[5].metric(
         "Tool Use",
-        str(payload["summary"]["passes"]["tool_use_correct"]),
+        f"{payload['summary']['passes']['tool_use_correct']} / {tool_applicable}",
     )
 
     st.subheader("Run Metadata")
