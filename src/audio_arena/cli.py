@@ -56,6 +56,8 @@ MODEL_ALIASES: dict[str, tuple[str, Optional[str], Optional[str]]] = {
     "glm-realtime-flash": ("glm-realtime-flash",               None,               "glm-realtime"),
     "glm-realtime-air":  ("glm-realtime-air",                  None,               "glm-realtime"),
     "nova-sonic":        ("amazon.nova-2-sonic-v1:0",          None,               "nova-sonic"),
+    "nemotron-voicechat": ("nemotron-voicechat",               None,               "nemotron-voicechat"),
+    "personaplex":       ("personaplex",                       None,               "personaplex"),
 }
 
 
@@ -69,6 +71,8 @@ PIPELINE_CLASSES = {
     "grok-realtime": "audio_arena.pipelines.grok_realtime.GrokRealtimePipeline",
     "glm-realtime": "audio_arena.pipelines.glm_realtime.GLMRealtimePipeline",
     "nova-sonic": "audio_arena.pipelines.nova_sonic.NovaSonicPipeline",
+    "nemotron-voicechat": "audio_arena.pipelines.nemotron_voicechat.NemotronVoiceChatPipeline",
+    "personaplex": "audio_arena.pipelines.personaplex.PersonaPlexPipeline",
 }
 
 REHYDRATED_TURN_RUNS_DIRNAME = "turn_runs"
@@ -187,6 +191,10 @@ def infer_pipeline(model: str) -> str:
         return "realtime"
     if "nova-sonic" in m or "nova_sonic" in m:
         return "nova-sonic"
+    if "voicechat" in m:
+        return "nemotron-voicechat"
+    if "personaplex" in m:
+        return "personaplex"
     return "text"
 
 
@@ -477,7 +485,7 @@ def run(
     """Run a benchmark against an LLM.
 
     Model aliases (auto-fill service & pipeline):
-        gpt-realtime, gemini-native-audio, ultravox, grok-realtime, nova-sonic
+        gpt-realtime, gemini-native-audio, ultravox, grok-realtime, nova-sonic, nemotron-voicechat, personaplex
 
     Examples:
         uv run audio-arena run conversation_bench --model gpt-realtime

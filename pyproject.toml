@@ -17,6 +17,7 @@ dependencies = [
   "claude-agent-sdk>=0.1.8",
   "torch>=2.9.1",
   "torchaudio>=2.9.1",
+  "httpx>=0.28",
 ]
 
 [project.scripts]
